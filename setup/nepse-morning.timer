@@ -1,0 +1,11 @@
+[Unit]
+Description=NEPSE AI — Morning Workflow Timer (10:15 AM NST = 04:30 UTC, Mon–Fri)
+
+[Timer]
+# Updated April 2026: Monday-Friday
+OnCalendar=Mon,Tue,Wed,Thu,Fri 04:30:00 UTC
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

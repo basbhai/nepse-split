@@ -1,0 +1,15 @@
+[Unit]
+Description=NEPSE AI — Sleep Scheduler (set RTC alarm, then suspend)
+After=nepse-eod.service nepse-weekly.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/shanvi/nepse-engine
+ExecStart=/home/shanvi/nepse-engine/venv/bin/python setup/sleep_scheduler.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nepse-sleep
+EnvironmentFile=/home/shanvi/nepse-engine/.env
+
+[Install]
+WantedBy=default.target

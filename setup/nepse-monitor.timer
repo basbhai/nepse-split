@@ -1,0 +1,11 @@
+[Unit]
+Description=NEPSE AI — Execution Monitor Timer (starts 11:15 AM NST)
+
+[Timer]
+# 11:15 AM NST = 05:30 UTC
+OnCalendar=Mon,Tue,Wed,Thu,Fri 05:30:00 UTC
+AccuracySec=10s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

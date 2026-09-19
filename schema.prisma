@@ -1,0 +1,1834 @@
+// schema.prisma — NEPSE AI Engine
+// Single source of truth for all tables.
+// Edit here, then run: python -m db.codegen → python -m db.migrations
+//
+// Type conventions:
+//   Text     — nullable TEXT column (most columns)
+//   Text!    — NOT NULL TEXT column
+//   Serial   — SERIAL PRIMARY KEY (auto-increment id)
+//   Boolean  — TEXT storing "true"/"false" (kept as Text for simplicity)
+//
+// Annotations:
+//   @id              — PRIMARY KEY
+//   @unique          — UNIQUE INDEX
+//   @default("val")  — DEFAULT value
+//   @@index([col])   — regular index
+//   @@index([a, b])  — composite index
+//
+// Cleanup applied: April 5, 2026
+//   DROPPED: watchlist (superseded by share_sectors)
+//   DROPPED: macro_data (superseded by nrb_monthly)
+//   DROPPED: news_sentiment (no writer/reader existed)
+//   REMOVED: market_log.dual_audit, market_log.gpt_verdict (legacy GPT dual-verdict architecture)
+//   REMOVED: nepal_pulse.ccd_ratio, .crr, .slr, .trade_deficit_npr (redundant with nrb_monthly)
+//
+// Updated: May 13, 2026
+//   ADDED: market_log — 6 momentum/reversal columns (momentum_status, rsi_slope_3d,
+//          macd_hist_slope, bb_pct_b_slope, bounce_failed, reversal_days)
+//   FIXED: daily_context_log headline columns (SQL type annotation corrected)
+//   FIXED: nrb_monthly closing brace typo
+//
+// Updated: May 16, 2026
+//   ADDED: trade_journal — 9 entry-snapshot columns so auditor carries momentum/live
+//          context through to trade close (momentum_status_entry, rsi_slope_3d_entry,
+//          macd_hist_slope_entry, bb_pct_b_slope_entry, bounce_failed_entry,
+//          reversal_days_entry, vwap_dev_entry, bid_ask_ratio_entry, dpr_proximity_entry)
+//   SOURCE: auditor.py looks up market_log BUY row at entry_date to populate these.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRICE & MARKET DATA
+// ─────────────────────────────────────────────────────────────────────────────
+
+model price_history {
+  id           Serial
+  date         Text!          // YYYY-MM-DD
+  symbol       Text!
+  open         Text
+  high         Text
+  low          Text
+  close        Text
+  ltp          Text
+  volume       Text
+  turnover     Text
+  vwap         Text
+  prev_close   Text
+  transactions Text
+  conf_score   Text
+  avg_120d     Text
+  avg_180d     Text
+  week52_high  Text
+  week52_low   Text
+  source       Text  @default("sharesansar")
+
+  @@unique([date, symbol])
+  @@index([symbol])
+  @@index([date])
+}
+
+model market_breadth {
+  id                 Serial
+  date               Text!
+  advancing          Text
+  declining          Text
+  unchanged          Text
+  new_52w_high       Text
+  new_52w_low        Text
+  total_turnover_npr Text
+  total_volume       Text
+  breadth_score      Text
+  market_signal      Text
+  nepse_index        Text
+  nepse_change_pct   Text
+  sensitive_index      Text
+  sensitive_change_pct Text
+  total_trades         Text
+  market_cash_in       Text
+  timestamp          Text
+
+  @@unique([date, timestamp])
+  @@index([date])
+  @@index([timestamp])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PORTFOLIO
+// ─────────────────────────────────────────────────────────────────────────────
+
+model portfolio {
+  id            Serial
+  symbol        Text!
+  entry_date    Text
+  entry_price   Text
+  shares        Text
+  total_cost    Text
+  current_price Text
+  current_value Text
+  pnl_npr       Text
+  pnl_pct       Text
+  peak_price    Text
+  stop_type     Text
+  stop_level    Text
+  trail_active  Text
+  trail_stop    Text
+  status        Text  @default("OPEN")
+  exit_date     Text
+  exit_price    Text
+  exit_reason   Text
+  demat_confirmed_date Text
+  // Date meroshare.py's sync last found this symbol present in Meroshare's
+  // myPortfolio (real CDSC demat balance). NULL until confirmed. Lets
+  // execution_monitor's settlement gate release a position for selling as
+  // soon as it's ACTUALLY settled, instead of always waiting a fixed T+3
+  // trading days regardless of real settlement status.
+
+  @@index([symbol])
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNALS & TRADING LOG
+// ─────────────────────────────────────────────────────────────────────────────
+
+model market_log {
+  id               Serial
+  date             Text
+  time             Text
+  symbol           Text
+  sector           Text
+  action           Text
+  confidence       Text
+  entry_price      Text
+  stop_loss        Text
+  target           Text
+  allocation_npr   Text
+  shares           Text
+  breakeven        Text
+  risk_reward      Text
+  rsi_14           Text
+  ema_20           Text
+  ema_50           Text
+  ema_200          Text
+  primary_signal   Text   // top signal that triggered recommendation
+  macd_line        Text
+  macd_signal      Text
+  macd_histogram   Text   // MACD histogram at signal time
+  bb_pct_b         Text   // Bollinger %B at signal time
+  bb_upper         Text   // Bollinger upper band
+  bb_lower         Text   // Bollinger lower band
+  bollinger_upper  Text
+  bollinger_lower  Text
+  ema_20_50_cross  Text   // EMA 20/50 crossover signal
+  ema_50_200_cross Text   // EMA 50/200 crossover signal
+  volume           Text
+  volume_ratio     Text
+  obv_trend        Text
+  vwap             Text
+  vwap_dev         Text   // (ltp - vwap) / vwap — ATrad intraday signal
+  bid_ask_ratio    Text   // bid_qty / (bid_qty + ask_qty) — demand pressure 0-1
+  dpr_proximity    Text   // (ltp - low_dpr) / (high_dpr - low_dpr) — circuit range position
+  volume_os_ratio  Text   // today_volume / outstanding_shares % — smart money signal
+  atr_14           Text
+  support_level    Text
+  resistance_level Text
+  candle_pattern   Text
+  conf_score       Text
+  pe_ratio         Text
+  eps              Text
+  roe              Text
+  npl_pct          Text
+  fundamental_score Text
+  geo_score        Text
+  macro_score      Text
+  sector_mult      Text   // sector multiplier applied at decision time
+  cstar_signal     Text   // c-star composite signal
+  market_state     Text   // BULLISH | BEARISH | SIDEWAYS at signal time
+  gemini_reason    Text   // Gemini rationale for recommendation
+  gemini_risk      Text   // Gemini identified risk factors
+  reasoning        Text
+  wait_condition        Text   // if WAIT/AVOID: specific condition that would make this a BUY
+  wait_condition_parsed Text   // JSON blob, null until parsed by condition_parser.py
+  last_reviewed_date    Text   // YYYY-MM-DD (NST) — set after each Claude re-evaluation
+  herding_note     Text   // one sentence on herding/bubble risk or NONE
+  lesson_applied   Text   // which lesson from Learning Hub was most relevant, or NONE (free-text, human-readable)
+  // lessons_applied is the structured source of truth for automated review.
+  // Pre-migration rows (before 2026-08-15) have lessons_applied = null and must be
+  // interpreted via the legacy lesson_applied text field above.
+  lessons_applied  Json?  // [{lesson_id: int, action: str, was_decisive: bool}, ...]
+  outcome          Text  @default("PENDING")
+  actual_pnl       Text
+  exit_price       Text
+  exit_date        Text
+  exit_reason      Text
+  // dual_audit    — REMOVED Apr 5 2026 (legacy GPT dual-verdict architecture)
+  // gpt_verdict   — REMOVED Apr 5 2026 (GPT is now weekly coach only)
+  timestamp        Text
+  eval_date              Text   // date tracker evaluated this
+  eval_geo_score         Text   // geo score at evaluation
+  eval_nepal_score       Text   // nepal score at evaluation
+  eval_nepse_index       Text   // NEPSE index at evaluation
+  eval_market_state      Text   // market state at evaluation
+  eval_policy_rate       Text   // NRB policy rate at evaluation
+  eval_fd_rate_pct       Text   // FD rate at evaluation
+  eval_geo_delta         Text   // geo_score_eval - geo_score_entry
+  eval_nepal_delta       Text   // nepal_score_eval - nepal_score_entry
+  eval_key_news          Text   // 2-3 line highlights from nepal_pulse.key_event
+  eval_price_change_pct  Text   // % price move from signal date to eval date
+  eval_nepse_change_pct  Text   // NEPSE % move over same period
+  eval_alpha             Text   // stock move vs NEPSE — same logic as trade_journal
+  headlines_politics     Text   // 1-2 political headlines affecting NEPSE
+  headlines_economy      Text   // 1-2 economic/macro headlines
+  headlines_stock        Text   // 1-2 stock market specific headlines
+
+  // ── Momentum / Reversal context — added May 13, 2026
+  // Computed by filter_engine._compute_momentum() from 7-day indicator history.
+  // Written by claude_analyst._write_to_db(). Read by Learning Hub for review.
+  momentum_status  Text   // FALLING_KNIFE | OVERSOLD_WATCH | EARLY_REVERSAL | CONFIRMED_REVERSAL | NEUTRAL
+  rsi_slope_3d     Text   // RSI direction over last 3 days — positive = improving
+  macd_hist_slope  Text   // MACD histogram slope over last 3 days — positive = improving
+  bb_pct_b_slope   Text   // BB %B slope — positive = recovering from lower band
+  bounce_failed    Text   // "true" | "false" — dead-cat bounce pattern detected
+  reversal_days    Text   // consecutive days RSI has been improving (integer as text)
+
+  // ── Dual-engine (v1/v2) arbitration — added 2026-07
+  engine_source    Text   @default("v1")   // "v1" | "v2" | "BOTH"
+  co_flagged_by    Text                    // other engine's opinion when only one engine's numbers won arbitration
+
+  @@index([symbol])
+  @@index([date])
+  @@index([outcome])
+  @@index([momentum_status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INDICATORS & CANDLES
+// ─────────────────────────────────────────────────────────────────────────────
+
+model indicators {
+  id               Serial
+  symbol           Text!
+  date             Text!
+  volume           Text
+  history_days     Text
+  rsi_14           Text
+  rsi_signal       Text   // OVERSOLD | NEUTRAL | OVERBOUGHT
+  ema_20           Text
+  ema_50           Text
+  ema_200          Text
+  ema_trend        Text   // ABOVE_ALL | BELOW_ALL | MIXED
+  ema_20_50_cross  Text   // GOLDEN | DEATH | NONE
+  ema_50_200_cross Text   // GOLDEN | DEATH | NONE
+  macd_line        Text
+  macd_signal      Text
+  macd_histogram   Text
+  macd_cross       Text   // BULLISH | BEARISH | NONE
+  bb_upper         Text
+  bb_middle        Text
+  bb_lower         Text
+  bb_width         Text
+  bb_pct_b         Text
+  bb_signal        Text   // SQUEEZE | EXPANSION | UPPER_TOUCH | LOWER_TOUCH | NEUTRAL
+  atr_14           Text
+  atr_pct          Text
+  obv              Text
+  obv_trend        Text   // RISING | FALLING | FLAT
+  support_level    Text   // lowest low over last 20 trading days
+  resistance_level Text   // highest high over last 20 trading days
+  pivot_p          Text   // classical pivot point, from prior day's OHLC
+  pivot_r1         Text
+  pivot_r2         Text
+  pivot_r3         Text
+  pivot_s1         Text
+  pivot_s2         Text
+  pivot_s3         Text
+  tech_score       Text   // 0–100
+  tech_signal      Text   // STRONG_BULL | BULL | NEUTRAL | BEAR | STRONG_BEAR
+  timestamp        Text
+
+  @@unique([symbol, date])
+  @@index([date])
+  @@index([tech_signal])
+}
+
+// Archive of superseded intraday indicator snapshots. When the 13:00 NST
+// re-run refreshes `indicators`, that morning's row is copied here first
+// (tagged with snapshot_time) so it isn't lost. filter_engine/gemini/claude
+// still read only `indicators` (the latest snapshot) -- this table is
+// history-only, not wired into any live decision path.
+model indicators_intraday {
+  id               Serial
+  snapshot_time    Text!  // e.g. "10:15" -- which run this row came from
+  symbol           Text
+  date             Text
+  volume           Text
+  history_days     Text
+  rsi_14           Text
+  rsi_signal       Text
+  ema_20           Text
+  ema_50           Text
+  ema_200          Text
+  ema_trend        Text
+  ema_20_50_cross  Text
+  ema_50_200_cross Text
+  macd_line        Text
+  macd_signal      Text
+  macd_histogram   Text
+  macd_cross       Text
+  bb_upper         Text
+  bb_middle        Text
+  bb_lower         Text
+  bb_width         Text
+  bb_pct_b         Text
+  bb_signal        Text
+  atr_14           Text
+  atr_pct          Text
+  obv              Text
+  obv_trend        Text
+  tech_score       Text
+  tech_signal      Text
+  timestamp        Text
+  support_level    Text
+  resistance_level Text
+  pivot_p          Text
+  pivot_r1         Text
+  pivot_r2         Text
+  pivot_r3         Text
+  pivot_s1         Text
+  pivot_s2         Text
+  pivot_s3         Text
+
+  @@index([symbol, date, snapshot_time])
+}
+
+model candle_patterns {
+  id                 Serial
+  pattern_name       Text!  @unique
+  type               Text   // BULLISH | BEARISH | NEUTRAL
+  tier               Text   // 1 | 2 | 3
+  nepal_win_rate_pct Text
+  sample_size        Text
+  avg_gain_pct       Text
+  best_sector        Text
+  best_rsi_range     Text
+  volume_condition   Text
+  reliability        Text
+  notes              Text
+}
+
+model candle_signals {
+  id               Serial
+  symbol           Text!
+  date             Text!
+  pattern_name     Text!
+  signal           Text   // BULLISH | BEARISH | NEUTRAL
+  tier             Text   // 1 | 2 | 3
+  confidence       Text
+  volume_confirmed Text   // "true" | "false"
+  candles_used     Text
+  description      Text
+  timestamp        Text
+
+  @@unique([symbol, date, pattern_name])
+  @@index([date])
+  @@index([symbol])
+  @@index([signal])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GEO & MACRO CONTEXT
+// ─────────────────────────────────────────────────────────────────────────────
+
+model geopolitical_data {
+  id               Serial
+  date             Text
+  time             Text
+  crude_price      Text
+  crude_change_pct Text
+  vix              Text
+  vix_level        Text   // CALM | LOW | ELEVATED | HIGH | EXTREME
+  nifty            Text
+  nifty_change_pct Text
+  dxy              Text
+  gold_price       Text
+  geo_score        Text   // -5 to +5
+  status           Text   // BULLISH | POSITIVE | NEUTRAL | BEARISH | CRISIS
+  key_event        Text
+  timestamp        Text
+
+  @@index([date])
+}
+
+model nepal_pulse {
+  id                   Serial
+  date                 Text
+  time                 Text
+  // NRB / Monetary
+  policy_rate          Text
+  policy_rate_change   Text   // RAISED | CUT | UNCHANGED
+  // ccd_ratio         — REMOVED Apr 5 2026 (redundant with nrb_monthly)
+  // crr               — REMOVED Apr 5 2026 (redundant with nrb_monthly.crr_percentage)
+  // slr               — REMOVED Apr 5 2026 (redundant with nrb_monthly.slr_percentage)
+  nrb_event            Text
+  // SEBON / Market
+  sebon_event          Text
+  circuit_breaker      Text
+  ipo_fpo_active       Text   // YES | NO
+  ipo_fpo_detail       Text
+  // Political
+  govt_stability       Text   // STABLE | UNSTABLE | CRISIS
+  political_event      Text
+  budget_season        Text   // YES | NO
+  budget_event         Text
+  // Economic
+  remittance_yoy_pct   Text
+  inflation_pct        Text
+  forex_reserve_months Text
+  // trade_deficit_npr — REMOVED Apr 5 2026 (BOP data is in nrb_monthly)
+  // Disruption
+  bandh_today          Text   // YES | NO
+  bandh_detail         Text
+  load_shedding_hrs    Text
+  // Score
+  nepal_score          Text   // -5 to +5
+  nepal_status         Text   // BULLISH | POSITIVE | NEUTRAL | BEARISH | CRISIS
+  key_event            Text
+  source               Text
+  timestamp            Text
+
+  headlines_politics   Text
+  headlines_economy    Text
+  headlines_stock      Text
+
+  @@index([date])
+}
+
+// macro_data — DROPPED Apr 5 2026 (superseded by nrb_monthly since Mar 28 fix)
+
+model nrb_monthly {
+  id                                  Serial
+  period                              Text!  @unique   // e.g. "fy2025/26-month8"
+  fiscal_year                         Text
+  month_number                        Text
+  is_annual                           Text   @default("false")
+
+  // ── Monetary Policy ───────────────────────────────────────────────────────
+  policy_rate                         Text
+  bank_rate                           Text
+  crr_percentage                      Text
+  slr_percentage                      Text
+
+  // ── Interest Rates ────────────────────────────────────────────────────────
+  lending_rate_pct                    Text   // commercial banks weighted avg
+  deposit_rate_pct                    Text   // commercial banks weighted avg
+  interbank_rate_pct                  Text   // weighted avg inter-bank rate
+  tbill_91d_rate_pct                  Text   // 91-day T-bill rate
+
+  // ── Inflation & Credit ────────────────────────────────────────────────────
+  cpi_inflation                       Text
+  credit_growth_rate                  Text   // YoY private sector credit growth
+  private_sector_credit_growth_yoy_pct Text  // same as above but explicit YoY
+  m2_growth_yoy_pct                   Text
+  deposit_growth_yoy_pct              Text
+  npl_ratio_pct                       Text   // non-performing loan ratio
+
+  // ── Liquidity ─────────────────────────────────────────────────────────────
+  liquidity_injected_billion          Text   // net liquidity absorbed/injected
+  liquidity_status                    Text   // SURPLUS | TIGHT | NEUTRAL
+
+  // ── Remittance ────────────────────────────────────────────────────────────
+  remittance_yoy_change_pct           Text
+  remittance_total_billion_npr        Text   // absolute figure for trend tracking
+
+  // ── Foreign Exchange ──────────────────────────────────────────────────────
+  fx_reserve_months                   Text
+  usd_npr_rate                        Text   // buying rate mid-period
+
+  // ── Balance of Payments ───────────────────────────────────────────────────
+  bop_overall_balance_usd_m           Text
+  bop_current_account_usd_m           Text
+  bop_capital_account_usd_m           Text
+  bop_trade_deficit_usd_m             Text
+  bop_status                          Text   // SURPLUS | DEFICIT
+  bop_trend                           Text   // IMPROVING | DETERIORATING | STABLE
+  bop_impact_on_nepse                 Text   // one sentence NEPSE liquidity implication
+
+  // ── Capital Market ────────────────────────────────────────────────────────
+  nepse_index_value                   Text   // NEPSE index at report date
+  nepse_index                         Text   // legacy — keep for backward compat
+  market_cap_billion_npr              Text
+
+  // ── Macro Sentiment ───────────────────────────────────────────────────────
+  overall_sentiment                   Text   // BULLISH | NEUTRAL | BEARISH
+  forward_guidance                    Text   // max 2 sentences
+  key_risks                           Text   // max 3 bullets
+
+  @@index([fiscal_year, month_number])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FUNDAMENTALS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model fundamentals {
+  id                   Int      @id @default(autoincrement())
+  symbol               String
+  stock_id             Int?
+  fiscal_year          String
+  quarter              String
+  eps                  Float?
+  net_worth            Float?
+  roe                  Float?
+  roa                  Float?
+  paidup_capital       Float?
+  reserve              Float?
+  total_assets         Float?
+  total_liabilities    Float?
+  deposit              Float?
+  loan                 Float?
+  net_interest_income  Float?
+  operating_profit     Float?
+  net_profit           Float?
+  npl                  Float?
+  capital_fund_to_rwa  Float?
+  cost_of_fund         Float?
+  base_rate            Float?
+  interest_spread      Float?
+  cd_ratio             Float?
+  dps                  Float?
+  sector_id            Int?
+  promoter_shares      Float?
+  public_shares        Float?
+  share_registar       String?
+  is_delisted          Boolean?
+  is_merged            Boolean?
+  core_capital         Float?
+  gram_value           Float?
+  prev_quarter_profit  Float?
+  growth_rate          Float?
+  close                Float?
+  discount_rate        Float?
+  pe_ratio             Float?
+  peg_value            Float?
+  scraped_at           DateTime @default(now())
+
+  @@unique([symbol, fiscal_year, quarter])
+  @@index([symbol])
+  @@index([fiscal_year, quarter])
+}
+
+model fundamental_beta {
+  id             Int      @id @default(autoincrement())
+  symbol         String   @db.VarChar(20)
+  beta           Float
+  market_corr    Float?
+  market_corr_p  Float?
+  n_months       Int?
+  period_start   DateTime?
+  period_end     DateTime?
+  computed_date  DateTime @default(now()) @db.Date
+
+  @@unique([symbol, computed_date])
+  @@index([symbol])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTOR & CORPORATE EVENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model sector_momentum {
+  id                    Serial
+  date                  Text
+  sector                Text
+  weekly_return_pct     Text
+  monthly_return_pct    Text
+  avg_volume_change_pct Text
+  momentum_score        Text
+  status                Text
+  top_stock_1           Text
+  top_stock_2           Text
+  catalyst              Text
+  last_updated          Text
+
+  @@index([date])
+  @@index([sector])
+}
+
+model corporate_events {
+  id                  Serial
+  symbol              Text
+  company             Text
+  event_type          Text
+  announcement_date   Text
+  event_date          Text
+  book_close_date     Text
+  details             Text
+  expected_impact_pct Text
+  days_until_event    Text
+  status              Text
+  source              Text
+
+  @@index([symbol])
+  @@index([event_date])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DIVIDEND TRACKING
+// ─────────────────────────────────────────────────────────────────────────────
+
+model dividend_announcements {
+  id                  Serial
+  symbol              Text!
+  company             Text
+  sector              Text
+  announcement_date   Text!          // YYYY-MM-DD — the event day (day 0)
+  fiscal_year         Text           // e.g. "2080/81"
+  dividend_type       Text           // CASH | BONUS | BOTH
+  cash_dividend_pct   Text           // cash % of face value
+  bonus_share_pct     Text           // bonus share %
+  total_dividend_pct  Text           // total effective %
+  book_close_date     Text           // last day to be eligible
+  direction           Text           // INCREASE | DECREASE | UNCHANGED | FIRST_TIME
+  prev_dividend_pct   Text           // previous year for comparison
+  source              Text  @default("sharesansar")
+  scraped_at          Text
+
+  @@unique([symbol, announcement_date])
+  @@index([symbol])
+  @@index([announcement_date])
+  @@index([direction])
+  @@index([sector])
+}
+
+model dividend_pattern_study {
+  id                    Serial
+  symbol                Text!
+  announcement_date     Text!
+  sector                Text
+  direction             Text          // INCREASE | DECREASE | UNCHANGED
+
+  // Price drift before announcement
+  price_drift_d10       Text          // % price change from day -10 to day 0
+  price_drift_d6        Text          // % price change from day -6 to day 0
+  price_drift_d4        Text          // % price change from day -4 to day 0
+  price_drift_d2        Text          // % price change from day -2 to day 0
+
+  // Volume momentum before announcement
+  vol_ratio_d6          Text          // volume at day -6 / avg_volume_20d
+  vol_ratio_d4          Text          // volume at day -4 / avg_volume_20d
+  vol_ratio_d2          Text          // volume at day -2 / avg_volume_20d
+  vol_ratio_d1          Text          // volume at day -1 / avg_volume_20d
+
+  // Technical state before announcement
+  rsi_d6                Text          // RSI at day -6
+  rsi_d4                Text          // RSI at day -4
+  obv_trend_d6_to_d1    Text          // RISING | FALLING | FLAT over -6 to -1
+  atr_ratio_d6          Text          // ATR at -6 / avg_ATR_20d (compression = <1.0)
+  macd_state_d4         Text          // ABOVE | BELOW signal line at day -4
+
+  // Post-announcement outcome (for validating study)
+  return_d0             Text          // % return on announcement day
+  return_d1             Text          // % return on day +1
+  return_d2_d9          Text          // cumulative % return day +2 to +9
+  vs_nepse_d1           Text          // alpha vs NEPSE on day +1
+
+  // Pattern classification
+  pattern_detected      Text          // true | false — did pre-pattern fire?
+  pattern_type          Text          // ACCUMULATION | DISTRIBUTION | NONE
+  pattern_strength      Text          // STRONG | WEAK | NONE
+  entry_feasible        Text          // true | false — was T+3 entry possible?
+  optimal_entry_day     Text          // -6 | -5 | -4 | -3 — best day to enter
+
+  in_dividend_season    Text
+  event_type            Text
+  fiscal_year           Text
+  dividend_type         Text
+  run_date              Text          // when this analysis was run
+
+  @@unique([symbol, announcement_date])
+  @@index([symbol])
+  @@index([direction])
+  @@index([pattern_detected])
+  @@index([sector])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LEARNING & SELF-IMPROVEMENT
+// ─────────────────────────────────────────────────────────────────────────────
+
+// trade_journal: immutable raw record of every trade with full entry + exit context
+// One row per trade. Written by auditor.py at trade close. Never updated.
+model trade_journal {
+  id          Serial
+  created_at  Text           // YYYY-MM-DD HH:MM:SS NST
+
+  // ── Identity
+  symbol      Text!
+  sector      Text
+  paper_mode  Text           // true | false
+
+  // ── Entry context (snapshot at moment of BUY signal)
+  entry_date             Text
+  entry_price            Text
+  shares                 Text
+  allocation_npr         Text
+
+  primary_signal         Text  // MACD | BB_LOWER | SMA_CROSS | CANDLE | COMBO
+  secondary_signal       Text
+  candle_pattern         Text
+  confidence_at_entry    Text  // claude_analyst confidence 0-100
+
+  // Technical state at entry
+  rsi_entry              Text
+  macd_hist_entry        Text
+  bb_signal_entry        Text
+  ema_trend_entry        Text
+  obv_trend_entry        Text
+  conf_score_entry       Text
+  volume_ratio_entry     Text
+  atr_pct_entry          Text
+
+  // Market context at entry
+  market_state_entry     Text
+  geo_score_entry        Text
+  nepal_score_entry      Text
+  combined_geo_entry     Text
+  nepse_index_entry      Text
+
+  // Planned exit levels
+  stop_loss_planned      Text
+  target_planned         Text
+  hold_days_planned      Text
+
+  // ── Exit context
+  exit_date              Text
+  exit_price             Text
+  exit_reason            Text  // STOP_LOSS | TARGET_HIT | TRAILING_STOP | MANUAL | CIRCUIT_BREAKER | GEO_BLOCK
+
+  // Market context at exit
+  market_state_exit      Text
+  geo_score_exit         Text
+  nepal_score_exit       Text
+  combined_geo_exit      Text
+  nepse_index_exit       Text
+
+  // ── Computed outcomes (filled by auditor.py)
+  hold_days_actual       Text
+  return_pct             Text
+  pnl_npr                Text
+  result                 Text  // WIN | LOSS | BREAKEVEN
+
+  // Deltas — the critical causal layer
+  geo_delta              Text
+  nepal_delta            Text
+  combined_geo_delta     Text
+  nepse_return_pct       Text
+  alpha_vs_nepse         Text
+
+  // Loss attribution — computed by auditor.py _attribute_loss()
+  loss_cause             Text  // MACRO_DETERIORATION | SIGNAL_FAILURE | MARKET_WIDE_SELLOFF | ENTRY_TIMING | STOP_TOO_TIGHT | SECTOR_EVENT | NULL
+
+  // Learning link
+  lesson_ids             Text
+
+  // ── Momentum / Reversal context at entry — added May 16, 2026
+  // Copied from market_log BUY row by auditor.py at trade close.
+  // Mirrors the 6 momentum columns in market_log so council/hub can correlate
+  // entry momentum status with final trade outcome.
+  momentum_status_entry  Text   // FALLING_KNIFE | OVERSOLD_WATCH | EARLY_REVERSAL | CONFIRMED_REVERSAL | NEUTRAL — at BUY signal time
+  rsi_slope_3d_entry     Text   // RSI slope over 3 days at entry
+  macd_hist_slope_entry  Text   // MACD histogram slope at entry
+  bb_pct_b_slope_entry   Text   // BB %B slope at entry
+  bounce_failed_entry    Text   // "true" | "false" — dead-cat bounce at entry
+  reversal_days_entry    Text   // consecutive RSI improvement days at entry
+
+  // ── Live intraday signals at entry — added May 16, 2026
+  // Also copied from market_log BUY row (written from ATrad intraday scraper).
+  vwap_dev_entry         Text   // (ltp - vwap) / vwap deviation from fair value at entry
+  bid_ask_ratio_entry    Text   // bid_qty / (bid_qty + ask_qty) demand pressure 0-1 at entry
+  dpr_proximity_entry    Text   // (ltp - low_dpr) / (high_dpr - low_dpr) circuit range position at entry
+
+  @@index([symbol])
+  @@index([result])
+  @@index([primary_signal])
+  @@index([entry_date])
+  @@index([sector])
+  @@index([loss_cause])
+  @@index([paper_mode])
+}
+
+// learning_hub: synthesised lessons written by GPT weekly + research paper seeds
+model learning_hub {
+  id                 Serial
+  created_at          Text
+  date                Text
+  lesson_type         Text   // SIGNAL_FILTER | SECTOR_FILTER | MACRO_FILTER | ENTRY_TIMING | STOP_CALC | PORTFOLIO_RULE | DIVIDEND_PATTERN | CALENDAR_EFFECT | FAILURE_MODE
+  source              Text   // research_paper | gpt_weekly | claude | user
+  symbol              Text   // specific symbol OR 'MARKET'
+  sector              Text   // BANKING | NON_LIFE_INSURANCE | HYDRO | ALL etc
+  applies_to          Text   // ALL | sector-specific | symbol-specific
+  consumer            Text  @default("ALL")  // ALL | claude_only | gemini_only
+
+  condition           Text   // machine-readable trigger condition
+  finding             Text   // human-readable observation
+  action              Text   // REDUCE_CONFIDENCE_BY_25 | BLOCK_ENTRY | REQUIRE_VOLUME_CONFIRM | etc
+
+  trade_count         Text
+  win_count           Text
+  loss_count          Text
+  win_rate            Text
+  avg_return_pct      Text
+  avg_pnl_npr         Text
+
+  confidence_level    Text   // LOW | MEDIUM | HIGH
+
+  loss_cause_primary  Text
+  geo_delta_avg       Text
+  nepal_delta_avg     Text
+  alpha_vs_nepse_avg  Text
+
+  active               Text  @default("true")
+  superseded_by        Text   // forward pointer — id of lesson that replaced this one
+  supersedes_lesson_id Text   // backward pointer — id of lesson this one replaced
+  review_week          Text   // YYYY-WW — which Sunday GPT review wrote/updated this
+  evidence_window_days Text   // how many days of data GPT reviewed when writing this
+  market_log_ids       Text   // comma-separated market_log ids (WAIT/AVOID signals)
+  gpt_reasoning        Text   // GPT's explanation for writing or superseding this lesson
+  last_validated       Text
+  validation_count     Text
+  trade_journal_ids    Text
+  source_weight        Float  @default(1.0)
+
+  @@index([symbol])
+  @@index([sector])
+  @@index([lesson_type])
+  @@index([active])
+  @@index([source])
+  @@index([confidence_level])
+}
+
+// news_sentiment — DROPPED Apr 5 2026 (no writer/reader existed; nepal_pulse handles sentiment)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BACKTEST RESULTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model backtest_results {
+  id                  Serial
+  test_name           Text
+  parameter_tested    Text
+  optimal_value       Text
+  win_rate_at_optimal Text
+  sample_size         Text
+  confidence          Text
+  date_run            Text
+  notes               Text
+
+  sim_mode            Text   // constrained | free
+  period_start        Text
+  period_end          Text
+  total_trades        Text
+  wins                Text
+  losses              Text
+  win_rate_pct        Text
+  profit_factor       Text
+  annual_ret_pct      Text
+  total_pnl_npr       Text
+  total_fees_npr      Text
+  sharpe_ratio        Text
+  max_drawdown_pct    Text
+  alpha_vs_nepse      Text
+  signal_breakdown    Text
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CAPITAL MANAGEMENT
+// ─────────────────────────────────────────────────────────────────────────────
+
+model capital_allocation {
+  id              Serial
+  date            Text
+  market_state    Text   // FULL_BULL | CAUTIOUS_BULL | SIDEWAYS | BEAR | CRISIS
+  nepse_vs_200dma Text
+  stocks_pct      Text
+  fd_pct          Text
+  savings_pct     Text
+  od_pct          Text
+  fd_rate_used    Text
+  expected_return Text
+  reasoning       Text
+  review_date     Text
+  status          Text
+
+  @@index([date])
+}
+
+model financial_advisor {
+  id                     Serial
+  date                   Text
+  recommendation_type    Text
+  market_phase           Text
+  confidence_pct         Text
+  capital_in_stocks_pct  Text
+  capital_in_fd_pct      Text
+  capital_in_savings_pct Text
+  capital_in_od_pct      Text
+  three_month_outlook    Text
+  expected_return_pct    Text
+  fd_rate_used           Text
+  trigger_to_change      Text
+  review_date            Text
+  actual_outcome         Text
+  was_forecast_correct   Text
+
+  @@index([date])
+}
+
+model financials {
+  id            Serial
+  kpi_name      Text!  @unique
+  current_value Text
+  target_value  Text
+  alert_level   Text
+  status        Text
+  last_updated  Text
+  notes         Text
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SYSTEM CONFIG
+// ─────────────────────────────────────────────────────────────────────────────
+
+model settings {
+  id           Serial
+  key          Text!  @unique
+  value        Text
+  description  Text
+  last_updated Text
+  set_by       Text
+}
+
+// db_schema is managed internally by db/migrations.py — do not touch
+model db_schema {
+  id             Serial
+  migration_id   Text!  @unique
+  name           Text!
+  applied_at     Text
+  rolled_back_at Text
+  status         Text  @default("applied")
+  notes          Text
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INDEX HISTORY (for statistical analysis / backtester)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model nepse_indices {
+  id            Serial
+  date          Text!
+  index_id      Text!
+  index_name    Text!
+  current_value Text          // closing value
+  high          Text
+  low           Text
+  change_abs    Text
+  change_pct    Text
+  week52_high   Text
+  week52_low    Text
+  turnover      Text          // turnover value NPR
+  volume        Text          // turnover volume (shares)
+  transactions  Text          // total transactions
+  source        Text  @default("nepalstock")
+
+  @@unique([date, index_id])
+  @@index([date])
+  @@index([index_id])
+  @@index([index_name])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STATISTICAL ANALYSIS RESULTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model macro_stat_results {
+  id              Serial
+  variable        Text!
+  variable_label  Text
+  lag_months      Text!
+  spearman_rho    Text
+  p_value         Text
+  p_corrected     Text
+  significant     Text
+  effect_size     Text
+  n_pairs         Text
+  rho_3m_forward  Text
+  p_3m_forward    Text
+  n_pairs_3m      Text
+  n_total_tests   Text
+  alpha_corrected Text
+  run_date        Text
+  notes           Text
+
+  @@unique([variable, lag_months, run_date])
+  @@index([variable])
+  @@index([run_date])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DAILY CONTEXT LOG (Gemini nightly summary — one row per trading day)
+// Written by daily_context_summarizer.py at ~9 PM NST
+// Read by learning_hub.py (GPT Sunday review) — one clean row per day
+// instead of 40+ intraday rows from geopolitical_data / nepal_pulse
+// ─────────────────────────────────────────────────────────────────────────────
+
+model daily_context_log {
+  id                   Serial
+  date                 Text!  @unique    // YYYY-MM-DD trading day
+
+  // ── Scores (end-of-day final values)
+  geo_score_eod        Text             // final geo_score of the day (-5 to +5)
+  nepal_score_eod      Text             // final nepal_score of the day (-5 to +5)
+  combined_score_eod   Text             // geo + nepal combined
+  nepse_index_eod      Text             // NEPSE composite closing value
+  nepse_change_pct     Text             // % change vs previous day
+
+  // ── International
+  dxy_value            Text             // DXY close (validated signal)
+  dxy_change_pct       Text             // DXY % change vs previous day
+
+  // ── Market breadth
+  market_state         Text             // BULL | BEAR | SIDEWAYS from settings
+  advancing            Text             // advancing stocks count
+  declining            Text             // declining stocks count
+  breadth_score        Text             // market_breadth.breadth_score
+  total_turnover_npr   Text             // total market turnover
+
+  // ── Macro (carried forward from nrb_monthly — stable monthly)
+  policy_rate          Text             // NRB policy rate
+  fd_rate_pct          Text             // current avg FD rate from settings
+  lending_rate         Text             // from nrb_monthly
+  bop_status           Text             // from nrb_monthly
+  overall_sentiment    Text             // nrb_monthly overall_sentiment
+
+  // ── Gemini narrative summaries
+  key_events_summary   Text             // 4-6 sentence narrative of the day
+  nepal_pulse_highlights Text           // top 3 events from nepal_pulse.key_event
+  geo_summary          Text             // Gemini summary of geo/international movements
+  nrb_macro_summary    Text             // 2-line NRB macro context (refreshed monthly)
+
+  // ── Signals issued that day (from market_log)
+  signals_summary      Text             // e.g. "BUY: NABIL(82%), NHPC(71%) | AVOID: NICA(65%) | WAIT: GBBL(58%)"
+  buy_count            Text             // count of BUY signals
+  wait_count           Text             // count of WAIT signals
+  avoid_count          Text             // count of AVOID signals
+
+  gate_miss_count        Text           // how many symbols blocked today
+  gate_top_category      Text           // CONF_SCORE | TECH_SCORE | RSI_OVERBOUGHT etc
+  gate_false_block_pct   Text           // rolling 30d false block rate at summary time
+  signals_avg_confidence Text           // avg Claude confidence across all signals today
+
+  // ── Headlines
+  headlines_political  Text
+  headlines_economy    Text
+  headlines_nepse      Text
+
+  // ── Metadata
+  source               Text  @default("gemini_nightly")
+  backfilled           Text  @default("false")  // true if generated retroactively
+  created_at           Text
+
+  @@index([date])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FD RATE INTELLIGENCE
+// ─────────────────────────────────────────────────────────────────────────────
+
+model fd_rates {
+  id               Serial
+  fetch_date       Text!
+  institute_code   Text
+  institute_name   Text
+  product_name     Text
+  interest_rate    Text
+  interest_pct     Text
+  tenure_label     Text
+  tenure_months    Text
+  tenure_category  Text           // SHORT / MEDIUM / LONG / VLONG
+  minimum_balance  Text
+  institute_type   Text           // bank / finance / dev_bank / other
+  source           Text  @default("bankbyaj")
+
+  @@unique([fetch_date, institute_code, product_name])
+  @@index([fetch_date])
+  @@index([tenure_category])
+  @@index([interest_pct])
+}
+
+model fd_rate_summary {
+  id                 Serial
+  fetch_date         Text!  @unique
+  avg_rate_pct       Text
+  max_rate_pct       Text
+  min_rate_pct       Text
+  benchmark_rate_pct Text
+  benchmark_products Text
+  best_bank_name     Text
+  best_bank_rate     Text
+  best_tenure        Text
+  rate_vs_prev_pct   Text
+  rate_direction     Text
+  fd_score_signal    Text
+  total_products     Text
+
+  @@index([fetch_date])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INTERNATIONAL PRICES (for research / geo_correlation)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model international_prices {
+  id            serial
+  date          DateTime @db.Date
+  variable_name String   @db.VarChar(20)
+  close_price   Float?   @db.Decimal
+  source        String?  @default("yfinance") @db.VarChar(50)
+
+  @@index([date, variable_name])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SHARE SECTORS (symbol → sector mapping)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model share_sectors {
+  id             Serial
+  externalid     Int      @unique
+  companyname    String
+  symbol         String
+  securityname   String
+  status         String?
+  companyemail   String?
+  website        String?
+  sectorname     String
+  regulatorybody String
+  instrumenttype String
+
+  @@map("share_sectors")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAPER TRADING
+// ─────────────────────────────────────────────────────────────────────────────
+
+model paper_users {
+  id            Serial
+  telegram_id   Text!  @unique
+  discord_id    Text
+  username      Text
+  full_name     Text
+  status        Text   @default("PENDING")
+  registered_at Text
+  approved_at   Text
+  approved_by   Text
+
+  @@index([status])
+  @@index([discord_id])
+}
+
+model paper_capital {
+  id                  Serial
+  telegram_id         Text!  @unique
+  starting_capital    Text  @default("100000")
+  current_capital     Text  @default("100000")
+  total_realised_pnl  Text  @default("0")
+  total_fees_paid     Text  @default("0")
+  total_cgt_paid      Text  @default("0")
+  total_trades        Text  @default("0")
+  total_wins          Text  @default("0")
+  total_losses        Text  @default("0")
+  last_updated        Text
+  test_mode           Text  @default("false")
+
+  @@index([telegram_id])
+}
+
+model paper_portfolio {
+  id              Serial
+  telegram_id     Text!
+  symbol          Text!
+  status          Text  @default("OPEN")
+  total_shares    Text
+  wacc            Text
+  total_cost      Text
+  first_buy_date  Text
+  last_buy_date   Text
+  buy_count       Text  @default("1")
+  exit_date       Text
+  exit_price      Text
+  exit_shares     Text
+  gross_pnl       Text
+  sell_fees       Text
+  cgt_paid        Text
+  net_pnl         Text
+  result          Text
+  created_at      Text
+  updated_at      Text
+  test_mode       Text  @default("false")
+  audited         Text  @default("false")
+  peak_price      Text
+  trail_active    Text  @default("false")
+
+  @@index([telegram_id])
+  @@index([telegram_id, status])
+  @@index([symbol])
+  @@index([test_mode])
+}
+
+model paper_trade_log {
+  id             Serial
+  telegram_id    Text!
+  symbol         Text!
+  action         Text!
+  shares         Text
+  price          Text
+  gross_amount   Text
+  brokerage      Text
+  sebon          Text
+  dp_fee         Text
+  cgt            Text
+  total_fees     Text
+  net_amount     Text
+  capital_before Text
+  capital_after  Text
+  wacc_before    Text
+  wacc_after     Text
+  note           Text
+  created_at     Text
+  test_mode      Text  @default("false")
+  close_type     Text  @default("MANUAL")
+
+  @@index([telegram_id])
+  @@index([symbol])
+  @@index([test_mode])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GATE MISS TRACKING
+// ─────────────────────────────────────────────────────────────────────────────
+
+model gate_misses {
+  id                       Serial
+  date                     Text!
+  symbol                   Text!
+  sector                   Text
+  gate_reason              Text      // raw reason string: "CONF=42<50"
+  gate_category            Text      // normalized: CONF_SCORE | TECH_SCORE | etc
+  price_at_block           Text
+  market_state             Text
+  tech_score               Text
+  conf_score               Text
+  volume_os_ratio          Text      // today_volume / outstanding_shares %
+  vwap_dev                 Text      // % LTP deviation from VWAP at time of block
+  bid_ask_ratio            Text      // 0–1 order book pressure at time of block
+  dpr_proximity            Text      // 0–1 position in daily price range at time of block
+  composite_score_would_be Text
+  tracking_days            Text  @default("0")
+  outcome                  Text      // NULL until stamped: FALSE_BLOCK | CORRECT_BLOCK | NEUTRAL
+  outcome_return_pct       Text
+  outcome_stamped_at       Text
+
+  // ── Extended forensic columns — added 2026-06-22 ─────────────────────────
+  decision          Text   // TECH_GATE | GEMINI_SKIP | AI_VETO (NULL = TECH_GATE for old rows)
+  max_high_20d      Text   // highest close reached in 20-day tracking window
+  max_drawdown_20d  Text   // lowest close reached in 20-day tracking window
+  peak_day          Text   // 1-based trading day index when max_high occurred
+  would_have_caught Text   // "true"/"false" — did +5% hit before -8% stop?
+  outcome_tier      Text   // CLEAN_WIN|VOLATILE_WIN|BIG_WIN|FAKE_WIN|TIMEOUT_FLAT|LOSER
+
+  // ── Dual-engine (v1/v2) arbitration — added 2026-07
+  // Gates run before v1/v2 diverge, so this is always "shared" today —
+  // field added for schema consistency with market_log / filter_candidates_log only.
+  engine_source     Text   @default("shared")
+
+  @@unique([symbol, date])
+  @@index([date])
+  @@index([outcome])
+  @@index([gate_category])
+}
+
+model gate_proposals {
+  id                Serial
+  review_week       Text
+  proposal_number   Text
+  parameter_name    Text
+  current_value     Text
+  proposed_value    Text
+  reasoning         Text
+  false_block_rate  Text
+  sample_size       Text
+  status            Text  @default("PENDING")
+  decided_at        Text
+  applied_at        Text
+
+  @@index([review_week])
+  @@index([status])
+}
+
+model claude_audit {
+  id                 Serial
+  review_week        Text!  @unique
+  buy_count          Text
+  buy_win_rate       Text
+  buy_avg_return     Text
+  wait_count            Text
+  wait_accuracy         Text
+  wait_evaluated_count  Text
+  avoid_count           Text
+  avoid_accuracy        Text
+  avoid_evaluated_count Text
+  false_avoid_rate      Text
+  missed_entry_rate  Text
+  overall_accuracy   Text
+  macro_accuracy     Text
+  audit_summary      Text
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FLOORSHEET — Raw trade data (Merolagani 2019+ / Sharehubnepal 2023+)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model floorsheet {
+  id               Serial
+  date             Text!
+  symbol           Text!
+  contract_id      Text
+  buyer_broker_id  Text
+  seller_broker_id Text
+  buyer_broker     Text
+  seller_broker    Text
+  quantity         Text!
+  rate             Text!
+  amount           Text!
+  trade_time       Text    // NULL for Merolagani, HH:MM:SS for Sharehubnepal
+  source           Text    // 'merolagani' | 'sharehubnepal'
+
+  @@unique([date, contract_id, source])
+  @@index([date, symbol])
+  @@index([symbol])
+  @@index([date])
+  @@index([buyer_broker_id])
+  @@index([seller_broker_id])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FLOORSHEET SIGNALS — Computed daily per symbol from raw floorsheet
+// ─────────────────────────────────────────────────────────────────────────────
+
+model floorsheet_signals {
+  id                   Serial
+  date                 Text!
+  symbol               Text!
+  vwap                 Text    // sum(qty×rate)/sum(qty)
+  total_trades         Text    // total transactions
+  total_volume         Text    // total shares traded
+  total_turnover       Text    // total NPR amount
+  avg_trade_size       Text    // avg qty per trade
+  large_order_count    Text    // trades > 2× median qty
+  large_order_volume   Text    // total qty from large orders
+  large_order_pct      Text    // large_order_volume / total_volume
+  buyer_pressure       Text    // recurring buyer qty / total qty (0 to 1)
+  seller_pressure      Text    // recurring seller qty / total qty (0 to 1)
+  top_buyer_broker_id  Text    // most active buyer broker
+  top_seller_broker_id Text    // most active seller broker
+  broker_concentration Text    // top 3 brokers % of total volume
+  institutional_flag   Text    // true | false — large order + broker concentration
+  source               Text    // 'merolagani' | 'sharehubnepal' | 'combined'
+  computed_at          Text
+
+  @@unique([date, symbol])
+  @@index([date])
+  @@index([symbol])
+  @@index([institutional_flag])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATRAD MARKET WATCH — Live intraday data from ATrad TMS
+// Written every 10 min during market hours by atrad_scraper.py
+// ─────────────────────────────────────────────────────────────────────────────
+
+model atrad_market_watch {
+  id            Serial
+  date          Text!
+  time          Text!    // HH:MM:SS — lasttradedtime from ATrad
+  symbol        Text!
+  ltp           Text     // tradeprice — last traded price
+  open          Text     // openingprice
+  high          Text     // highpx
+  low           Text     // lowpx
+  vwap          Text     // exchange-computed VWAP
+  avg_price     Text     // avgprice — simple average
+  bid_price     Text     // best bid price
+  bid_qty       Text     // best bid quantity — buy pressure
+  ask_price     Text     // best ask price
+  ask_qty       Text     // best ask quantity — sell pressure
+  volume        Text     // totvolume
+  turnover      Text     // totturnover
+  total_trades  Text     // tottrades
+  net_change    Text     // netchange
+  pct_change    Text     // perchange
+  low_dpr       Text     // lower circuit breaker limit
+  high_dpr      Text     // upper circuit breaker limit
+  prev_dpr_low  Text     // popdprlow — yesterday's lower DPR
+  prev_dpr_high Text     // popdprhigh — yesterday's upper DPR
+  max_al_qty    Text     // maxalqty — max allowable quantity
+  prev_close    Text     // closingprice — previous day close for gap computation
+
+  // Derived signals — computed at write time
+  vwap_dev      Text     // (ltp - vwap) / vwap — deviation from fair value
+  bid_ask_ratio Text     // bid_qty / (bid_qty + ask_qty) — demand pressure 0 to 1
+  dpr_proximity Text     // (ltp - low_dpr) / (high_dpr - low_dpr) — position in range
+
+  @@unique([date, time, symbol])
+  @@index([date, symbol])
+  @@index([symbol])
+  @@index([date])
+  // Covers "latest tick per symbol" (DISTINCT ON (symbol) ... ORDER BY
+  // symbol, date DESC, time DESC) — the query shape used by dashboard_api.py
+  // and execution_monitor.py's DB-fallback LTP lookup. Without this, that
+  // pattern falls back to a full-table scan + sort as the table grows
+  // (took ~2.5s unfiltered at 466K rows before this index existed).
+  @@index([symbol, date(sort: Desc), time(sort: Desc)])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MONTHLY COUNCIL — multi-model deliberation (first Sunday of month)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model monthly_council_agenda {
+  id           Serial
+  run_month    Text!           // e.g. "2026-05"
+  item_number  Text
+  agenda_item  Text
+  approved_by  Text            // "sonnet"
+
+  @@unique([run_month, item_number])
+}
+
+model monthly_council_log {
+  id            Serial
+  run_month     Text!
+  stage         Text            // "stage_1_grok", "stage_2_gpt", "disagreement_score", etc.
+  agenda_item   Text
+  model         Text
+  direction     Text            // Bullish | Bearish | Neutral
+  confidence    Text
+  key_driver    Text
+  risk_factor   Text
+  full_response Text
+
+  @@index([run_month])
+}
+
+model monthly_council_checklist {
+  id               Serial
+  run_month        Text!  @unique
+  stop_trigger     Text
+  go_trigger       Text
+  noise_items      Text            // JSON array as text
+  confidence_score Text            // NEPSE Confidence Score from Chairman
+}
+
+model monthly_override {
+  id               Serial
+  run_month        Text!  @unique        // e.g. "2026-05"
+  confidence_score Int                   // Chairman NEPSE Confidence Score
+  buy_blocked      Text   @default("false")  // "true" if score <= 20 and BEAR/CRISIS
+  market_state     Text                  // market state at time of council
+  stop_trigger     Text                  // from checklist
+  go_trigger       Text                  // from checklist
+  inserted_at      Text
+  last_read_at     Text                  // updated by claude_analyst each morning
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACCURACY REVIEW — monthly DeepSeek R1 statistical analysis
+// ─────────────────────────────────────────────────────────────────────────────
+
+model accuracy_review_log {
+  id                    Serial
+  run_month             Text!  @unique
+  trade_count           Int
+  signal_accuracy       Text
+  sector_accuracy       Text
+  market_state_accuracy Text
+  confidence_calibration Text
+  false_block_analysis  Text
+  deepseek_proposals    Text
+  status                Text  @default("PENDING_REVIEW")
+  inserted_at           Text
+}
+
+model system_proposals {
+  id                Serial
+  run_month         Text!
+  source            Text        // "accuracy_review" | "monthly_council"
+  component         Text
+  proposal_type     Text        // "new_data_source" | "signal_weight" | "filter_threshold" | "sector_gate" | "remove_signal" | "add_signal"
+  current_behavior  Text
+  proposed_change   Text
+  data_evidence     Text
+  requires_new_data Text  @default("false")
+  new_data_source   Text
+  confidence        Text
+  status            Text  @default("PENDING")
+  approved_at       Text
+  rejected_at       Text
+  rejection_reason  Text
+  inserted_at       Text
+
+  @@index([run_month])
+  @@index([status])
+  @@index([component])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POLITICAL EVENT PATTERN SYSTEM
+// ─────────────────────────────────────────────────────────────────────────────
+
+model news_effect_patterns {
+  id                 Int      @id @default(autoincrement())
+  event_type         String
+  event_category     String   @default("POLITICAL")
+  lag_start          String
+  lag_end            String
+  magnitude          String
+  market_regime      String   @default("ALL")
+  status             String   @default("ACTIVE")
+  confidence_basis   String
+  evidence_quality   String
+  occurrence_count   String   @default("0")
+  weighted_accuracy  String   @default("0")
+  source             String   @default("research_validation_2026")
+  superseded_by      String?
+  active             String   @default("true")
+  notes              String?
+  inserted_at        DateTime @default(now())
+
+  @@index([event_type])
+  @@index([status])
+  @@index([active])
+}
+
+model pattern_validation_log {
+  id                          Int      @id @default(autoincrement())
+  event_type                  String
+  event_date                  String
+  event_cluster_id            String?
+  pattern_id                  String
+  lag_start                   String
+  lag_end                     String
+  magnitude_applied           String
+  market_regime               String   @default("UNKNOWN")
+  nepal_crisis_score_at_detection String @default("0")
+  predicted_date_start        String
+  predicted_date_end          String
+  actual_nepse_pct            String?
+  magnitude_error             String?
+  outcome                     String   @default("PENDING")
+  co_occurrence_count         String   @default("1")
+  escalated_from              String?
+  scored_by                   String   @default("pending")
+  scored_at                   String?
+  inserted_at                 DateTime @default(now())
+
+  @@index([event_type])
+  @@index([outcome])
+  @@index([event_date])
+  @@index([predicted_date_start])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AGENT TRACE — audit log for every step the agentic WAIT monitor takes
+// ─────────────────────────────────────────────────────────────────────────────
+
+model agent_trace {
+  id           Serial
+  cycle_ts     Text!          // NST timestamp — start of 10-min cycle
+  step         Text!          // iteration number within cycle
+  tool         Text!          // function name called
+  request_args Text           // JSON — arguments passed to tool
+  response     Text           // JSON — what the tool returned
+  escalated    Text  @default("false")   // true if this step escalated to Claude
+  decision     Text           // MET | NOT_MET | ESCALATED | SKIPPED | MARKET_ADVERSE
+  elapsed_ms   Text           // time taken inside this tool call
+  created_at   Text           // row insertion time NST
+
+  @@index([cycle_ts])
+  @@index([tool])
+  @@index([decision])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WAIT PARSE LOG — audit each free-LLM parse of a wait_condition text
+// Written by agent/condition_parser.py when a new parse is performed.
+// Never updated — one row per parse attempt.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model wait_parse_log {
+  id                Serial
+  market_log_id     Text!        // FK to market_log.id (stored as text, no FK constraint)
+  parsed_at         Text!        // YYYY-MM-DD HH:MM:SS NST
+  raw_condition     Text         // original wait_condition text
+  parsed_json       Text         // JSON extracted by free LLM
+  model_used        Text         // which free model performed the parse
+
+  @@index([market_log_id])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI CALL LOG — full request/response for every OpenRouter call (Claude, GPT,
+// DeepSeek). Written by AI/openrouter.py on every ask_claude/ask_gpt/
+// ask_deepseek call, success or failure — one row per call, for audit/review.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ai_call_log {
+  id             Serial
+  called_at      Text!        // YYYY-MM-DD HH:MM:SS NST
+  model          Text!        // e.g. anthropic/claude-sonnet-4-6
+  context        Text!        // caller tag, e.g. claude_analyst, learning_hub
+  symbol         Text         // candidate symbol if applicable, else blank
+  system_prompt  Text         // full system prompt sent
+  user_prompt    Text         // full user prompt sent
+  response_raw   Text         // full raw response text (pre-parse)
+  success        Text         // "true"/"false"
+  error_msg      Text         // populated only on failure
+  latency_ms     Text
+  backend        Text         // "cli" | "openrouter" — which transport served this call
+  cost_usd       Text         // total_cost_usd from the claude -p envelope (reference estimate, not a charge)
+  tokens_in      Text         // usage.input_tokens  (cli path only)
+  tokens_out     Text         // usage.output_tokens (cli path only)
+
+  @@index([context])
+  @@index([symbol])
+  @@index([backend])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BROKER FLOW (daily accumulation / distribution per symbol)
+// Populated by modules/broker_flow_scraper.py at 9 PM NST.
+// No backfill — forward only.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model broker_flow {
+  id     Serial
+  date   Text!
+  symbol Text!
+  name   Text
+
+  // ── 1D accumulation ───────────────────────────────────────────────────────
+  acc_broker_count_1d   Text
+  acc_amount_1d         Text
+  acc_qty_1d            Text
+  acc_top_broker_1d     Text
+  acc_top_broker_pct_1d Text
+
+  // ── 1D distribution ───────────────────────────────────────────────────────
+  dist_broker_count_1d   Text
+  dist_amount_1d         Text
+  dist_qty_1d            Text
+  dist_top_broker_1d     Text
+  dist_top_broker_pct_1d Text
+
+  // ── Net flow 1D ───────────────────────────────────────────────────────────
+  net_flow_1d  Text   // acc_amount_1d - dist_amount_1d (NPR)
+  flow_bias_1d Text   // ACCUMULATION | DISTRIBUTION | NEUTRAL
+
+  // ── 1W accumulation ───────────────────────────────────────────────────────
+  acc_broker_count_1w   Text
+  acc_amount_1w         Text
+  acc_qty_1w            Text
+  acc_top_broker_1w     Text
+  acc_top_broker_pct_1w Text
+
+  // ── 1W distribution (placeholder — not fetched to save API calls) ─────────
+  dist_broker_count_1w   Text
+  dist_amount_1w         Text
+  dist_qty_1w            Text
+  dist_top_broker_1w     Text
+  dist_top_broker_pct_1w Text
+
+  // ── Net flow 1W ───────────────────────────────────────────────────────────
+  net_flow_1w  Text
+  flow_bias_1w Text
+
+  // ── Raw broker lists (JSON strings) ──────────────────────────────────────
+  acc_brokers_1d_json  Text   // [{broker, amount, qty, acc_pct, avg_rate}, ...]
+  dist_brokers_1d_json Text
+  acc_brokers_1w_json  Text
+
+  created_at Text
+
+  @@unique([symbol, date])
+  @@index([date])
+  @@index([symbol])
+  @@index([flow_bias_1d])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BROKER HOLDINGS (aggressive/concentrated holdings snapshot)
+// Source: broker-aggressive-holdings?EquityOnly=true (current snapshot)
+// ~58 symbols returned — pre-filtered by Sharehub to high-concentration only.
+// One row per symbol per date. Populated alongside broker_flow at 9 PM NST.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model broker_holdings {
+  id     Serial
+  date   Text!
+  symbol Text!
+  name   Text
+
+  // ── Holdings metrics ──────────────────────────────────────────────────────
+  total_involved_brokers   Text   // total brokers that traded this symbol
+  top3_holding_pct         Text   // % of total qty held by top 3 brokers
+  total_qty                Text   // total quantity traded
+  hold_qty                 Text   // quantity still held (not sold)
+  hold_pct                 Text   // hold_qty / total_qty * 100
+  public_trade_pct         Text   // % that leaked to public (lower = stealthier)
+  stealth_score            Text   // top3_holding_pct * (1 - public_trade_pct/100)
+
+  // ── Price context ─────────────────────────────────────────────────────────
+  ltp            Text
+  change         Text
+  change_pct     Text
+
+  // ── Top 3 brokers ─────────────────────────────────────────────────────────
+  top_broker_1_name    Text
+  top_broker_1_code    Text
+  top_broker_1_hold    Text   // holdQuantity
+  top_broker_1_pct     Text   // holdingPercentage
+
+  top_broker_2_name    Text
+  top_broker_2_code    Text
+  top_broker_2_hold    Text
+  top_broker_2_pct     Text
+
+  top_broker_3_name    Text
+  top_broker_3_code    Text
+  top_broker_3_hold    Text
+  top_broker_3_pct     Text
+
+  // ── Full top brokers JSON (for email detail) ──────────────────────────────
+  top_brokers_json Text   // [{id, code, name, totalBuyQuantity, holdQuantity, holdingPercentage}]
+
+  created_at Text
+
+  @@unique([symbol, date])
+  @@index([date])
+  @@index([symbol])
+  @@index([stealth_score])
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FILTER CANDIDATES LOG — symbols that passed filter_engine each trading day
+// Written by filter_engine._log_filter_candidates() just before Gemini hand-off.
+// Append-only instrumentation — never deleted, never updated for logic.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model filter_candidates_log {
+  id              Serial
+  date            Text!
+  symbol          Text!
+  sector          Text
+  composite_score Float
+  primary_signal  Text
+  tech_score      Float
+  macro_score     Float
+  market_state    Text
+  pass_count      Int    @default(1)
+  last_seen       DateTime @db.Timestamptz
+  created_at      DateTime @default(now()) @db.Timestamptz
+  engine_source   Text   @default("v1")   // "v1" | "v2" | "BOTH" — added 2026-07, dual-engine arbitration
+
+  @@unique([symbol, date])
+  @@index([date])
+  @@index([symbol])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STEALTH ACCUMULATION SIGNALS
+// Populated daily by stat_method/hidden_accum_scanner.py after EOD scrape.
+// Tracks quiet broker accumulation → trigger → close lifecycle.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model stealth_signals {
+  id             Serial
+  symbol         Text!
+  broker_id      Text!
+  broker_name    Text!
+  signal_date    Text!          // YYYY-MM-DD — day streak threshold was first met
+  streak_days    Text           // consecutive net-buy days at signal time
+  vol_ratio      Text           // today_volume / 60d_avg_volume on signal day
+  price_range    Text           // (max-min)/min over last 20 trading days on signal day
+  entry_price    Text           // closing price on signal date
+  status         Text  @default("WATCHING")  // WATCHING | TRIGGERED | CLOSED
+  trigger_date   Text           // date volume spike or price breakout fired
+  trigger_price  Text           // closing price on trigger date
+  trigger_type   Text           // VOLUME_SPIKE_1.5X | VOLUME_SPIKE_2X | VOLUME_SPIKE_3X | PRICE_BREAKOUT_3PCT | PRICE_BREAKOUT_5PCT | PRICE_BREAKOUT_20D_HIGH | BOTH
+  trigger_vol_ratio Text        // actual vol ratio on trigger day
+  close_date     Text           // date signal closed (90d after trigger)
+  close_price    Text           // closing price on close date
+  return_pct     Text           // (close_price - trigger_price) / trigger_price * 100
+  window_days    Text           // lookback window that fired (30 | 60 | 90)
+  vol_thresh     Text           // vol_ratio threshold used for this broker
+  price_thresh   Text           // price_range threshold used for this broker
+  streak_thresh  Text           // min streak threshold used for this broker
+  created_at     Text           // YYYY-MM-DD HH:MM:SS NST — row created
+  updated_at     Text           // YYYY-MM-DD HH:MM:SS NST — last updated
+
+  @@unique([symbol, broker_id, signal_date])
+  @@index([status])
+  @@index([symbol])
+  @@index([signal_date])
+  @@index([broker_id])
+}

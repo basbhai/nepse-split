@@ -1,0 +1,1973 @@
+"""
+web_ui/dashboard_api.py
+NEPSE AI Engine — Dashboard read-only API
+
+Run:
+    uvicorn web_ui.dashboard_api:app --port 8766 --reload
+"""
+
+import logging
+import sys
+import os
+import subprocess
+import time
+import datetime
+import decimal
+import secrets
+import hmac
+from datetime import date
+
+import re as _re
+import io as _io
+import csv as _csv
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from starlette.responses import JSONResponse, Response
+from pydantic import BaseModel
+from typing import Optional
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from db.connection import _db
+from sheets import upsert_row, read_tab, run_raw_sql, update_row
+from config import NST
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [DASH_API] %(levelname)s: %(message)s",
+)
+log = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app):
+    try:
+        with _db() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS saved_queries (
+                  id SERIAL PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  description TEXT,
+                  sql TEXT NOT NULL,
+                  created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+        log.info("saved_queries table ensured")
+    except Exception as e:
+        log.exception("Failed to ensure saved_queries table: %s", e)
+    yield
+
+app = FastAPI(title="NEPSE AI — Dashboard API", version="1.0.0", lifespan=lifespan)
+
+# Tailscale Funnel exposes this app to the public internet using this
+# hostname. Requests arriving with this Host header are public; anything
+# else (localhost, LAN IP, tailnet 100.x IP) is local/trusted.
+PUBLIC_HOST = "shanvi-home.tail5acc61.ts.net"
+
+app.add_middleware(
+    CORSMiddleware,
+    # dashboard.html only ever fetch()es its own origin (API = window.location.origin),
+    # so the only legitimate cross-origin caller is the public Funnel host itself.
+    # Wildcard ("*") let ANY website script reads against this API from a visitor's
+    # browser — narrowed here as part of the dashboard auth fix.
+    allow_origins=[f"https://{PUBLIC_HOST}"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Route prefixes hidden from public (funnel) traffic — NRB entry, settings.
+# NOTE: /register is intentionally NOT blocked — Discord/Telegram bots link
+# external users there to request access; it must stay public.
+_PUBLIC_BLOCKED_PREFIXES = ("/nrb", "/settings")
+
+
+def is_public(request: Request) -> bool:
+    host = request.headers.get("host", "")
+    return host.split(":")[0] == PUBLIC_HOST
+
+
+@app.middleware("http")
+async def block_sensitive_routes_from_public(request: Request, call_next):
+    if is_public(request) and request.url.path.startswith(_PUBLIC_BLOCKED_PREFIXES):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await call_next(request)
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+# Local/LAN/tailnet traffic (is_public() == False) is trusted automatically, same
+# as the existing NRB/settings model above — no login needed on your own machine
+# or tailnet. Anything arriving on the public Funnel hostname must present either
+# a valid session cookie (obtained by typing DASHBOARD_AUTH_SECRET at /login) or
+# the secret itself as an "X-API-Key" header (for scripts/bots). Without
+# DASHBOARD_AUTH_SECRET configured, public access is refused entirely (fail closed)
+# rather than silently left open.
+DASHBOARD_AUTH_SECRET = os.getenv("DASHBOARD_AUTH_SECRET", "")
+if not DASHBOARD_AUTH_SECRET:
+    log.warning(
+        "DASHBOARD_AUTH_SECRET is not set — public (Funnel) access will be refused "
+        "entirely until it's configured in .env."
+    )
+
+SESSION_COOKIE = "nepse_session"
+SESSION_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
+
+# In-process session store: session_id -> expires_at (monotonic-free, wall clock
+# is fine here since it only needs to survive within one running server process,
+# same pattern as _server_cache below).
+_sessions: dict[str, float] = {}
+
+_AUTH_EXEMPT_PATHS = {"/health", "/robots.txt", "/login", "/register"}
+
+
+def _valid_api_key(request: Request) -> bool:
+    key = request.headers.get("x-api-key", "")
+    return bool(DASHBOARD_AUTH_SECRET) and hmac.compare_digest(key, DASHBOARD_AUTH_SECRET)
+
+
+def _valid_session(request: Request) -> bool:
+    sid = request.cookies.get(SESSION_COOKIE, "")
+    if not sid:
+        return False
+    expires_at = _sessions.get(sid)
+    if expires_at is None or expires_at < time.time():
+        _sessions.pop(sid, None)
+        return False
+    return True
+
+
+_LOGIN_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>NEPSE AI — Login</title>
+<style>
+  body{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+  form{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:32px;width:280px}
+  h1{font-size:16px;margin:0 0 20px}
+  input{width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;color:#e6edf3;
+        border-radius:6px;padding:10px 12px;font-size:14px;margin-bottom:12px}
+  button{width:100%;background:#238636;border:none;color:#fff;border-radius:6px;padding:10px;
+         font-size:14px;cursor:pointer}
+  button:hover{background:#2ea043}
+  #err{color:#f85149;font-size:12px;min-height:16px;margin-bottom:8px}
+</style></head>
+<body>
+  <form id="f">
+    <h1>NEPSE AI Dashboard</h1>
+    <input type="password" id="pw" placeholder="Password" autofocus autocomplete="current-password"/>
+    <div id="err"></div>
+    <button type="submit">Log in</button>
+  </form>
+  <script>
+    document.getElementById('f').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = document.getElementById('err');
+      err.textContent = '';
+      try {
+        const r = await fetch('/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({password: document.getElementById('pw').value}),
+        });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || 'Login failed'); }
+        window.location.href = '/dashboard';
+      } catch (ex) { err.textContent = ex.message; }
+    });
+  </script>
+</body></html>"""
+
+
+class _LoginBody(BaseModel):
+    password: str
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    return HTMLResponse(_LOGIN_PAGE)
+
+
+@app.post("/login")
+def login_submit(body: _LoginBody):
+    if not DASHBOARD_AUTH_SECRET or not hmac.compare_digest(body.password, DASHBOARD_AUTH_SECRET):
+        raise HTTPException(status_code=401, detail="Incorrect password")
+    sid = secrets.token_urlsafe(32)
+    _sessions[sid] = time.time() + SESSION_TTL_SECONDS
+    resp = JSONResponse({"status": "ok"})
+    resp.set_cookie(
+        SESSION_COOKIE, sid, max_age=SESSION_TTL_SECONDS,
+        httponly=True, secure=True, samesite="lax",
+    )
+    return resp
+
+
+@app.post("/logout")
+def logout(request: Request):
+    sid = request.cookies.get(SESSION_COOKIE, "")
+    _sessions.pop(sid, None)
+    resp = JSONResponse({"status": "ok"})
+    resp.delete_cookie(SESSION_COOKIE)
+    return resp
+
+
+# The pipeline that produces this data runs every ~6 min, so a response is
+# never more than one cycle stale — caching it for 2 min cuts the
+# dashboard's tab-switch/auto-refresh traffic to near zero without ever
+# showing data older than the pipeline's own refresh cadence.
+#
+# Two layers:
+#   1. Client (Cache-Control: private, max-age=120) — the requesting
+#      browser skips the network entirely on repeat requests. `private`
+#      (not `public`) keeps it out of any shared/proxy cache — this app is
+#      reachable over Tailscale Funnel, and trade/portfolio data must only
+#      ever be cached in the operator's own browser, never a shared
+#      intermediary.
+#   2. Server (in-memory, process-local) — when a request *does* reach the
+#      backend (a different browser/device, or the client cache expired),
+#      it's served from memory instead of re-querying Postgres, so N
+#      viewers within the same 2-minute window cost one DB round trip
+#      total instead of N.
+_CACHEABLE_PREFIXES = (
+    "/dashboard/summary", "/dashboard/market_log", "/dashboard/broker_flow",
+    "/dashboard/learning_hub", "/dashboard/audit", "/dashboard/council",
+    "/dashboard/trades", "/dashboard/portfolio", "/dashboard/gate_tracker",
+    "/stealth/stats", "/stealth/watching", "/stealth/triggered", "/stealth/history",
+    "/nrb/periods", "/reporter/tables", "/engine-versions",
+)
+_CACHE_CONTROL     = "private, max-age=120"
+_SERVER_CACHE_TTL  = 120  # seconds — matches the client-side max-age above
+_server_cache: dict[str, tuple[float, int, bytes, str]] = {}  # path -> (expires_at, status, body, content_type)
+
+
+# Any non-GET under these prefixes mutates config the cached reads depend on,
+# so the response cache is flushed after it — a dashboard toggle then shows up
+# on the next poll instead of lagging by up to _SERVER_CACHE_TTL.
+_CACHE_BUSTING_PREFIXES = (
+    "/settings", "/engine-versions", "/nrb/upsert", "/reporter/queries",
+)
+
+
+@app.middleware("http")
+async def cache_dashboard_reads(request: Request, call_next):
+    if request.method != "GET":
+        response = await call_next(request)
+        if (200 <= response.status_code < 300
+                and request.url.path.startswith(_CACHE_BUSTING_PREFIXES)):
+            _server_cache.clear()
+        return response
+    if not request.url.path.startswith(_CACHEABLE_PREFIXES):
+        return await call_next(request)
+
+    cache_key = request.url.path
+    now = time.monotonic()
+
+    hit = _server_cache.get(cache_key)
+    if hit and hit[0] > now:
+        _, status_code, body, content_type = hit
+        return Response(
+            content=body, status_code=status_code, media_type=content_type,
+            headers={"Cache-Control": _CACHE_CONTROL, "X-Cache": "HIT"},
+        )
+
+    response = await call_next(request)
+    if response.status_code != 200:
+        return response
+
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    _server_cache[cache_key] = (now + _SERVER_CACHE_TTL, response.status_code, body, response.media_type)
+
+    return Response(
+        content=body, status_code=response.status_code, media_type=response.media_type,
+        headers={"Cache-Control": _CACHE_CONTROL, "X-Cache": "MISS"},
+    )
+
+
+# Registered last (=> outermost / runs first, per Starlette's middleware stack
+# build order) so an unauthenticated public request is rejected before it can
+# ever reach cache_dashboard_reads above — otherwise a cached response body
+# populated by a legitimate authenticated request could be served straight
+# back to an unauthenticated caller for the same path.
+def _public_auth_required() -> bool:
+    """
+    Checked only for requests already identified as public (Funnel) traffic —
+    toggled via PATCH /settings/DASHBOARD_PUBLIC_AUTH_REQUIRED, a route that
+    is itself in _PUBLIC_BLOCKED_PREFIXES and therefore only reachable from
+    a private/LAN/tailnet caller. Defaults to "true" (fail closed) if unset.
+    """
+    from sheets import get_setting as _gs
+    return _gs("DASHBOARD_PUBLIC_AUTH_REQUIRED", "true").lower() != "false"
+
+
+@app.middleware("http")
+async def require_auth_for_public(request: Request, call_next):
+    path = request.url.path
+    if path in _AUTH_EXEMPT_PATHS or not is_public(request):
+        return await call_next(request)
+    if not _public_auth_required():
+        return await call_next(request)
+    if _valid_session(request) or _valid_api_key(request):
+        return await call_next(request)
+    if path in ("/", "/dashboard"):
+        return RedirectResponse(url="/login", status_code=302)
+    return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
+
+_HTML = os.path.join(os.path.dirname(__file__), "dashboard.html")
+
+
+def _safe(val):
+    """Convert psycopg2 non-JSON-serialisable types to plain Python."""
+    if isinstance(val, (datetime.datetime, datetime.date, datetime.time)):
+        return val.isoformat()
+    if isinstance(val, decimal.Decimal):
+        return float(val)
+    return val
+
+
+def _rows(cur) -> list[dict]:
+    return [{k: _safe(v) for k, v in dict(r).items()} for r in (cur.fetchall() or [])]
+
+
+def _safe_float(val):
+    try:
+        return float(val) if val not in (None, "", "null", "None") else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _to_str(val) -> Optional[str]:
+    if val is None:
+        return None
+    return str(val)
+
+
+# ── NRB Model ─────────────────────────────────────────────────────────────────
+
+class NRBPayload(BaseModel):
+    period:                                str
+    fiscal_year:                           str
+    month_number:                          str
+    is_annual:                             str = "false"
+    policy_rate:                           Optional[str] = None
+    bank_rate:                             Optional[str] = None
+    crr_percentage:                        Optional[str] = None
+    slr_percentage:                        Optional[str] = None
+    lending_rate_pct:                      Optional[str] = None
+    deposit_rate_pct:                      Optional[str] = None
+    interbank_rate_pct:                    Optional[str] = None
+    tbill_91d_rate_pct:                    Optional[str] = None
+    cpi_inflation:                         Optional[str] = None
+    credit_growth_rate:                    Optional[str] = None
+    private_sector_credit_growth_yoy_pct:  Optional[str] = None
+    m2_growth_yoy_pct:                     Optional[str] = None
+    deposit_growth_yoy_pct:                Optional[str] = None
+    npl_ratio_pct:                         Optional[str] = None
+    liquidity_injected_billion:            Optional[str] = None
+    liquidity_status:                      Optional[str] = None
+    remittance_yoy_change_pct:             Optional[str] = None
+    remittance_total_billion_npr:          Optional[str] = None
+    fx_reserve_months:                     Optional[str] = None
+    usd_npr_rate:                          Optional[str] = None
+    bop_overall_balance_usd_m:             Optional[str] = None
+    bop_current_account_usd_m:             Optional[str] = None
+    bop_capital_account_usd_m:             Optional[str] = None
+    bop_trade_deficit_usd_m:               Optional[str] = None
+    bop_status:                            Optional[str] = None
+    bop_trend:                             Optional[str] = None
+    bop_impact_on_nepse:                   Optional[str] = None
+    nepse_index_value:                     Optional[str] = None
+    nepse_index:                           Optional[str] = None
+    market_cap_billion_npr:                Optional[str] = None
+    overall_sentiment:                     Optional[str] = None
+    forward_guidance:                      Optional[str] = None
+    key_risks:                             Optional[str] = None
+
+
+class RegisterUserPayload(BaseModel):
+    full_name:   str
+    telegram_id: Optional[str] = None
+    discord_id:  Optional[str] = None
+
+
+# ── Static ────────────────────────────────────────────────────────────────────
+
+_NRB_HTML      = os.path.join(os.path.dirname(__file__), "nrb_entry.html")
+_REGISTER_HTML = os.path.join(os.path.dirname(__file__), "register.html")
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+def robots():
+    return "User-agent: *\nAllow: /"
+
+
+@app.get("/")
+@app.get("/dashboard")
+def serve_dashboard(request: Request):
+    with open(_HTML, "r", encoding="utf-8") as f:
+        html = f.read()
+    flag = "true" if is_public(request) else "false"
+    html = html.replace(
+        "<head>", f"<head>\n<script>window.__PUBLIC_MODE__ = {flag};</script>", 1
+    )
+    return HTMLResponse(html)
+
+
+@app.get("/nrb")
+def serve_nrb():
+    return FileResponse(_NRB_HTML)
+
+
+@app.get("/register")
+def serve_register():
+    return FileResponse(_REGISTER_HTML)
+
+
+# ── Register ──────────────────────────────────────────────────────────────────
+
+@app.post("/register")
+def register_user(body: RegisterUserPayload):
+    full_name   = body.full_name.strip()
+    telegram_id = (body.telegram_id or "").strip()
+    discord_id  = (body.discord_id or "").strip()
+
+    if not full_name:
+        raise HTTPException(status_code=400, detail="full_name is required")
+    if not telegram_id and not discord_id:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of telegram_id or discord_id is required",
+        )
+
+    try:
+        existing = None
+        if telegram_id:
+            rows = run_raw_sql(
+                'SELECT * FROM "paper_users" WHERE telegram_id = %s',
+                (telegram_id,),
+            )
+            existing = rows[0] if rows else None
+        if existing is None and discord_id:
+            rows = run_raw_sql(
+                'SELECT * FROM "paper_users" WHERE discord_id = %s',
+                (discord_id,),
+            )
+            existing = rows[0] if rows else None
+
+        if existing:
+            updates = {"full_name": full_name}
+            if telegram_id:
+                updates["telegram_id"] = telegram_id
+            if discord_id:
+                updates["discord_id"] = discord_id
+            update_row("paper_users", updates, where={"id": existing["id"]})
+            return {"status": "updated", "id": existing["id"]}
+
+        effective_telegram_id = telegram_id or f"discord_only_{discord_id}"
+        upsert_row(
+            "paper_users",
+            {
+                "telegram_id":   effective_telegram_id,
+                "discord_id":    discord_id or None,
+                "full_name":     full_name,
+                "status":        "APPROVED",
+                "registered_at": datetime.datetime.now(NST).isoformat(),
+            },
+            conflict_columns=["telegram_id"],
+        )
+        return {"status": "created", "telegram_id": effective_telegram_id}
+
+    except Exception as e:
+        log.exception("register_user failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Health ────────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "dashboard_api"}
+
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+@app.get("/dashboard/summary")
+def get_summary():
+    try:
+        with _db() as cur:
+            # paper_capital
+            cur.execute(
+                "SELECT current_capital, total_trades, total_wins, total_losses "
+                "FROM paper_capital WHERE test_mode = 'false' ORDER BY id DESC LIMIT 1"
+            )
+            cap = cur.fetchone()
+            cap = dict(cap) if cap else {}
+
+            # open paper positions
+            cur.execute("""
+                SELECT symbol, total_shares, wacc
+                FROM paper_portfolio
+                WHERE status = 'OPEN' AND test_mode = 'false'
+            """)
+            positions = _rows(cur)
+
+            # LTP for just those symbols — NOT an unfiltered DISTINCT ON over
+            # the whole atrad_market_watch table (450K+ rows growing daily),
+            # which took ~2.5s on its own and was ~100% of this endpoint's
+            # latency. Same WHERE symbol = ANY(...) pattern already used by
+            # /dashboard/portfolio below.
+            open_symbols = [p["symbol"] for p in positions if p.get("symbol")]
+            ltp_by_symbol: dict = {}
+            if open_symbols:
+                cur.execute("""
+                    SELECT DISTINCT ON (symbol) symbol, ltp
+                    FROM atrad_market_watch
+                    WHERE symbol = ANY(%s)
+                    ORDER BY symbol, date DESC, time DESC
+                """, (open_symbols,))
+                ltp_by_symbol = {r["symbol"]: r["ltp"] for r in _rows(cur)}
+            for p in positions:
+                p["current_ltp"] = ltp_by_symbol.get(p.get("symbol"))
+
+            unrealized_pnl = 0.0
+            for p in positions:
+                shares = _safe_float(p.get("total_shares")) or 0
+                wacc   = _safe_float(p.get("wacc")) or 0
+                ltp    = _safe_float(p.get("current_ltp")) or 0
+                if ltp and wacc:
+                    unrealized_pnl += shares * (ltp - wacc)
+
+            # trade_journal aggregate
+            cur.execute("""
+                SELECT
+                    COUNT(*)                                                          AS total,
+                    SUM(CASE WHEN result = 'WIN'  THEN 1 ELSE 0 END)                 AS wins,
+                    SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END)                 AS losses,
+                    AVG(CASE WHEN return_pct ~ '^-?[0-9]+\\.?[0-9]*$'
+                             THEN return_pct::float ELSE NULL END)                   AS avg_return
+                FROM trade_journal
+            """)
+            tj = dict(cur.fetchone() or {})
+
+            # market_state from settings
+            cur.execute(
+                "SELECT value FROM settings WHERE key = 'MARKET_STATE' ORDER BY id DESC LIMIT 1"
+            )
+            ms = cur.fetchone()
+            market_state = ms["value"] if ms else None
+
+            # nepal_score (from nepal_pulse)
+            cur.execute(
+                "SELECT nepal_score FROM nepal_pulse ORDER BY date DESC, id DESC LIMIT 1"
+            )
+            np_row = cur.fetchone()
+            nepal_score = np_row["nepal_score"] if np_row else None
+
+            # geo_score (from geopolitical_data)
+            cur.execute(
+                "SELECT geo_score FROM geopolitical_data ORDER BY date DESC, id DESC LIMIT 1"
+            )
+            geo_row = cur.fetchone()
+            geo_score = geo_row["geo_score"] if geo_row else None
+
+            # NEPSE index last 30 days
+            cur.execute("""
+                SELECT date, current_value, change_pct, index_name
+                FROM nepse_indices
+                WHERE index_name ILIKE '%nepse%' OR index_id = 'NEPSE'
+                ORDER BY date DESC
+                LIMIT 30
+            """)
+            nepse_30d = list(reversed(_rows(cur)))
+
+            # recent Claude signals (BUY / WAIT / AVOID — skip Gemini pre-screen rows)
+            cur.execute("""
+                SELECT date, symbol, action, confidence, primary_signal, outcome, actual_pnl
+                FROM market_log
+                WHERE action IN ('BUY','WAIT','AVOID')
+                ORDER BY date DESC, id DESC
+                LIMIT 5
+            """)
+            recent_signals = _rows(cur)
+
+        total  = int(tj.get("total") or 0)
+        wins   = int(tj.get("wins")  or 0)
+        losses = int(tj.get("losses") or 0)
+        win_rate = round(wins / total * 100, 1) if total > 0 else 0.0
+
+        return {
+            "paper_capital":    cap.get("current_capital"),
+            "open_positions":   len(positions),
+            "unrealized_pnl":   round(unrealized_pnl, 2),
+            "trade_journal": {
+                "total_trades": total,
+                "wins":         wins,
+                "losses":       losses,
+                "win_rate":     win_rate,
+                "avg_return":   round(_safe_float(tj.get("avg_return")) or 0, 2),
+            },
+            "market_state":    market_state,
+            "nepal_score":     nepal_score,
+            "geo_score":       geo_score,
+            "nepse_30d":       nepse_30d,
+            "recent_signals":  recent_signals,
+        }
+    except Exception as e:
+        log.exception("summary failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Broker Flow ───────────────────────────────────────────────────────────────
+
+@app.get("/dashboard/broker_flow")
+def get_broker_flow():
+    """Return top 8 accumulation and top 8 distribution rows from latest broker_flow date."""
+    try:
+        with _db() as cur:
+            cur.execute("SELECT MAX(date) as latest FROM broker_flow")
+            row = cur.fetchone()
+            latest = row["latest"] if row else None
+            if not latest:
+                return {"date": None, "accumulation": [], "distribution": []}
+
+            cur.execute("""
+                SELECT symbol, name,
+                       acc_broker_count_1d, acc_qty_1d, acc_amount_1d,
+                       acc_top_broker_1d, acc_top_broker_pct_1d,
+                       net_flow_1d, flow_bias_1d
+                FROM broker_flow
+                WHERE date = %s
+                  AND flow_bias_1d = 'ACCUMULATION'
+                  AND NULLIF(acc_qty_1d, '') IS NOT NULL
+                ORDER BY (
+                    CAST(NULLIF(acc_amount_1d, '0') AS FLOAT) *
+                    CAST(NULLIF(acc_qty_1d, '0') AS FLOAT) /
+                    NULLIF(CAST(NULLIF(acc_broker_count_1d, '0') AS FLOAT), 0)
+                ) DESC NULLS LAST
+                LIMIT 8
+            """, (latest,))
+            acc_rows = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT symbol, name,
+                       dist_broker_count_1d, dist_qty_1d, dist_amount_1d,
+                       dist_top_broker_1d, dist_top_broker_pct_1d,
+                       net_flow_1d, flow_bias_1d
+                FROM broker_flow
+                WHERE date = %s
+                  AND flow_bias_1d = 'DISTRIBUTION'
+                  AND NULLIF(dist_qty_1d, '') IS NOT NULL
+                ORDER BY (
+                    CAST(NULLIF(dist_amount_1d, '0') AS FLOAT) *
+                    CAST(NULLIF(dist_qty_1d, '0') AS FLOAT) /
+                    NULLIF(CAST(NULLIF(dist_broker_count_1d, '0') AS FLOAT), 0)
+                ) DESC NULLS LAST
+                LIMIT 8
+            """, (latest,))
+            dist_rows = [dict(r) for r in cur.fetchall()]
+
+            return {
+                "date": latest,
+                "accumulation": [_safe(r) for r in acc_rows],
+                "distribution":  [_safe(r) for r in dist_rows],
+            }
+    except Exception as e:
+        log.exception("broker_flow endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Market Log ────────────────────────────────────────────────────────────────
+
+@app.get("/dashboard/market_log")
+def get_market_log():
+    try:
+        with _db() as cur:
+            cur.execute("SELECT * FROM market_log ORDER BY date DESC, id DESC LIMIT 10")
+            rows = _rows(cur)
+        return {"rows": rows, "count": len(rows)}
+    except Exception as e:
+        log.exception("market_log failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Learning Hub ──────────────────────────────────────────────────────────────
+
+@app.get("/dashboard/learning_hub")
+def get_learning_hub():
+    try:
+        with _db() as cur:
+            cur.execute(
+                "SELECT * FROM learning_hub WHERE active = 'true' ORDER BY id"
+            )
+            active = _rows(cur)
+
+            superseded_ids = []
+            for lesson in active:
+                sid = lesson.get("supersedes_lesson_id")
+                if sid and str(sid).isdigit():
+                    superseded_ids.append(int(sid))
+
+            old_lessons: dict = {}
+            if superseded_ids:
+                cur.execute(
+                    "SELECT * FROM learning_hub WHERE id = ANY(%s)",
+                    (superseded_ids,),
+                )
+                for row in _rows(cur):
+                    old_lessons[str(row["id"])] = row
+
+        return {"lessons": active, "superseded_lessons": old_lessons}
+    except Exception as e:
+        log.exception("learning_hub failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Audit ─────────────────────────────────────────────────────────────────────
+
+@app.get("/dashboard/audit")
+def get_audit():
+    try:
+        with _db() as cur:
+            cur.execute("SELECT * FROM claude_audit ORDER BY review_week ASC")
+            rows = _rows(cur)
+        return {"rows": rows, "count": len(rows)}
+    except Exception as e:
+        log.exception("audit failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Gate Tracker ──────────────────────────────────────────────────────────────
+
+@app.get("/dashboard/gate_tracker")
+def get_gate_tracker():
+    try:
+        with _db() as cur:
+            # Overall stats
+            cur.execute("""
+                SELECT
+                    COUNT(*)                                                AS total,
+                    SUM(CASE WHEN outcome IS NULL     THEN 1 ELSE 0 END)   AS pending,
+                    SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END)   AS stamped,
+                    SUM(CASE WHEN outcome = 'FALSE_BLOCK'   THEN 1 ELSE 0 END) AS false_blocks,
+                    SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END)   AS total_stamped,
+                    SUM(CASE WHEN would_have_caught = 'true'
+                              AND outcome IS NOT NULL THEN 1 ELSE 0 END)   AS would_caught
+                FROM gate_misses
+            """)
+            ov = dict(cur.fetchone() or {})
+            total        = int(ov.get("total",        0) or 0)
+            pending      = int(ov.get("pending",      0) or 0)
+            stamped      = int(ov.get("stamped",      0) or 0)
+            false_blocks = int(ov.get("false_blocks", 0) or 0)
+            would_caught = int(ov.get("would_caught", 0) or 0)
+            fb_rate      = round(false_blocks / stamped, 4) if stamped else 0.0
+            wc_rate      = round(would_caught / stamped, 4) if stamped else 0.0
+
+            overall = {
+                "total":                   total,
+                "pending":                 pending,
+                "stamped":                 stamped,
+                "false_block_rate":        fb_rate,
+                "would_have_caught_rate":  wc_rate,
+            }
+
+            # By category breakdown
+            cur.execute("""
+                SELECT
+                    gate_category,
+                    COALESCE(decision, 'TECH_GATE')                             AS decision,
+                    COUNT(*)                                                     AS total,
+                    SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END)        AS stamped,
+                    SUM(CASE WHEN outcome = 'FALSE_BLOCK'   THEN 1 ELSE 0 END)  AS false_block,
+                    SUM(CASE WHEN outcome = 'CORRECT_BLOCK' THEN 1 ELSE 0 END)  AS correct_block,
+                    SUM(CASE WHEN outcome = 'NEUTRAL'       THEN 1 ELSE 0 END)  AS neutral,
+                    SUM(CASE WHEN would_have_caught = 'true'
+                              AND outcome IS NOT NULL       THEN 1 ELSE 0 END)  AS would_caught
+                FROM gate_misses
+                GROUP BY gate_category, COALESCE(decision, 'TECH_GATE')
+                ORDER BY total DESC
+            """)
+            cat_rows = _rows(cur)
+            by_category = []
+            for r in cat_rows:
+                st = int(r.get("stamped", 0) or 0)
+                fb = int(r.get("false_block", 0) or 0)
+                wc = int(r.get("would_caught", 0) or 0)
+                by_category.append({
+                    "gate_category":         r.get("gate_category") or "OTHER",
+                    "decision":              r.get("decision") or "TECH_GATE",
+                    "total":                 int(r.get("total", 0) or 0),
+                    "stamped":               st,
+                    "false_block":           fb,
+                    "correct_block":         int(r.get("correct_block", 0) or 0),
+                    "neutral":               int(r.get("neutral", 0) or 0),
+                    "false_block_rate":      round(fb / st, 4) if st else 0.0,
+                    "would_have_caught":     wc,
+                    "would_have_caught_rate": round(wc / st, 4) if st else 0.0,
+                })
+
+            # Recent false blocks (last 20)
+            cur.execute("""
+                SELECT date, symbol, gate_category,
+                       COALESCE(decision, 'TECH_GATE') AS decision,
+                       outcome_return_pct, outcome_tier,
+                       would_have_caught, market_state
+                FROM gate_misses
+                WHERE outcome = 'FALSE_BLOCK'
+                and  gate_category != 'HISTORY' 
+                ORDER BY outcome_stamped_at DESC NULLS LAST, date DESC
+                LIMIT 10
+            """)
+            recent_fb = _rows(cur)
+
+        return {
+            "overall":              overall,
+            "by_category":          by_category,
+            "recent_false_blocks":  recent_fb,
+        }
+    except Exception as e:
+        log.exception("gate_tracker failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Council ───────────────────────────────────────────────────────────────────
+
+@app.get("/dashboard/council")
+def get_council():
+    try:
+        with _db() as cur:
+            cur.execute(
+                "SELECT DISTINCT run_month FROM monthly_council_log "
+                "WHERE run_month ~ '^[0-9]{4}-[0-9]{2}$' "
+                "ORDER BY run_month DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            latest_month = row["run_month"] if row else None
+
+            if not latest_month:
+                return {"log": [], "agenda": [], "checklist": [], "proposals": [], "run_month": None}
+
+            cur.execute(
+                "SELECT * FROM monthly_council_log WHERE run_month = %s ORDER BY id ASC",
+                (latest_month,)
+            )
+            log_rows = _rows(cur)
+
+            cur.execute(
+                "SELECT * FROM monthly_council_agenda WHERE run_month = %s ORDER BY item_number ASC",
+                (latest_month,)
+            )
+            agenda_rows = _rows(cur)
+
+            cur.execute(
+                "SELECT * FROM monthly_council_checklist WHERE run_month = %s ORDER BY id ASC",
+                (latest_month,)
+            )
+            checklist_rows = _rows(cur)
+
+            cur.execute(
+                "SELECT * FROM system_proposals WHERE run_month = %s ORDER BY id ASC",
+                (latest_month,)
+            )
+            proposals_rows = _rows(cur)
+
+        return {
+            "log":       log_rows,
+            "agenda":    agenda_rows,
+            "checklist": checklist_rows,
+            "proposals": proposals_rows,
+            "run_month": latest_month,
+        }
+    except Exception as e:
+        log.exception("council failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Trades ────────────────────────────────────────────────────────────────────
+
+@app.get("/dashboard/trades")
+def get_trades():
+    try:
+        with _db() as cur:
+            cur.execute("SELECT * FROM trade_journal ORDER BY entry_date DESC")
+            tj_rows = _rows(cur)
+
+            cur.execute("SELECT * FROM paper_portfolio ORDER BY first_buy_date DESC")
+            pp_rows = _rows(cur)
+
+        return {"trade_journal": tj_rows, "paper_portfolio": pp_rows}
+    except Exception as e:
+        log.exception("trades failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Portfolio ─────────────────────────────────────────────────────────────────
+
+@app.get("/dashboard/portfolio")
+def get_portfolio():
+    try:
+        from sheets import get_setting as _gs
+        live_monitor    = _gs("LIVE_MONITOR_ENABLED", "true").strip().lower() == "true"
+        live_auto_close = _gs("LIVE_AUTO_CLOSE_ENABLED", "false").strip().lower() == "true"
+
+        with _db() as cur:
+            cur.execute(
+                "SELECT * FROM paper_portfolio "
+                "WHERE status = 'OPEN' AND test_mode = 'false'"
+            )
+            open_positions = _rows(cur)
+            for p in open_positions:
+                p["book"] = "paper"
+
+            # Live book — the portfolio table the execution monitor guards.
+            live_positions = []
+            if live_monitor:
+                cur.execute("""
+                    SELECT symbol, entry_date, entry_price, shares, total_cost,
+                           peak_price, trail_active
+                    FROM portfolio WHERE status = 'OPEN'
+                    ORDER BY entry_date
+                """)
+                for r in _rows(cur):
+                    ed = str(r.get("entry_date") or "")[:10]
+                    try:
+                        from calendar_guard import trading_days_since
+                        from datetime import date as _date
+                        tds = trading_days_since(_date.fromisoformat(ed)) if ed else 99
+                    except Exception:
+                        tds = 99
+                    live_positions.append({
+                        "book": "live",
+                        "symbol": r.get("symbol"),
+                        "first_buy_date": ed,
+                        "total_shares": r.get("shares"),
+                        "buy_price": r.get("entry_price"),   # raw purchase price
+                        "wacc": r.get("entry_price"),        # recomputed below to all-in per-share
+                        "total_cost": r.get("total_cost"),
+                        "trail_active": str(r.get("trail_active")).lower() == "true",
+                        "settlement_locked": tds < 3,
+                        "monitored": True,
+                        "auto_sell": live_auto_close,
+                    })
+            open_positions.extend(live_positions)
+
+            cur.execute(
+                "SELECT current_capital FROM paper_capital "
+                "WHERE test_mode = 'false' ORDER BY id DESC LIMIT 1"
+            )
+            cap = cur.fetchone()
+            cash = cap["current_capital"] if cap else None
+
+            symbols = [p["symbol"] for p in open_positions if p.get("symbol")]
+            ltp_map: dict = {}
+            if symbols:
+                # Fetch latest ATrad tick (intraday) with its date so we can
+                # compare recency against price_history.
+                cur.execute("""
+                    SELECT DISTINCT ON (symbol) symbol, ltp, date AS atrad_date
+                    FROM atrad_market_watch
+                    WHERE symbol = ANY(%s)
+                    ORDER BY symbol, date DESC, time DESC
+                """, (symbols,))
+                atrad_rows = {r["symbol"]: r for r in _rows(cur)}
+
+                # Fetch most recent EOD close per symbol from price_history
+                # (no date filter — works on weekends / non-trading days too).
+                cur.execute("""
+                    SELECT DISTINCT ON (symbol) symbol, close, date AS ph_date
+                    FROM price_history
+                    WHERE symbol = ANY(%s)
+                      AND close IS NOT NULL AND close != ''
+                    ORDER BY symbol, date DESC
+                """, (symbols,))
+                ph_rows = {r["symbol"]: r for r in _rows(cur)}
+
+                for sym in symbols:
+                    atrad = atrad_rows.get(sym)
+                    ph    = ph_rows.get(sym)
+                    if not atrad and not ph:
+                        continue
+                    if not ph:
+                        ltp_map[sym] = atrad["ltp"]
+                    elif not atrad:
+                        ltp_map[sym] = ph["close"]
+                    else:
+                        # price_history wins when its date >= ATrad date:
+                        #   same day  → EOD official close beats intraday tick
+                        #   older day → ATrad has live data for a newer session
+                        if ph["ph_date"] >= atrad["atrad_date"]:
+                            ltp_map[sym] = ph["close"]
+                        else:
+                            ltp_map[sym] = atrad["ltp"]
+
+        from decimal import Decimal as _D
+        from modules.trading_core import calc_buy_fees, calc_sell_fees, hold_days
+
+        for p in open_positions:
+            sym  = p.get("symbol", "")
+            ltp  = _safe_float(ltp_map.get(sym)) or 0
+            shrs = _safe_float(p.get("total_shares")) or 0
+            p["current_ltp"] = ltp_map.get(sym)
+
+            # Cost basis / buy price differ by book:
+            #   live  — total_cost already includes buy brokerage+SEBON+DP;
+            #           buy_price is the raw purchase price (CGT basis).
+            #   paper — total_cost is wacc*shares only; add buy fees to get
+            #           the true amount paid.
+            if p.get("book") == "live":
+                buy_px     = _safe_float(p.get("buy_price")) or 0
+                total_paid = _safe_float(p.get("total_cost")) or (buy_px * shrs)
+            else:
+                buy_px     = _safe_float(p.get("wacc")) or 0
+                gross_buy  = buy_px * shrs
+                try:
+                    bf = float(calc_buy_fees(_D(str(buy_px)), _D(str(shrs)))["total_fees"])
+                except Exception:
+                    bf = 0.0
+                total_paid = gross_buy + bf
+
+            # Per-share all-in cost — the real WACC to display.
+            if shrs:
+                p["wacc"] = round(total_paid / shrs, 4)
+                p["total_cost"] = round(total_paid, 2)
+
+            if ltp and shrs and buy_px:
+                try:
+                    hd = hold_days(str(p.get("first_buy_date") or "")[:10])
+                except Exception:
+                    hd = 0
+                # net proceeds if sold now at LTP: gross − sell brokerage/SEBON/DP − CGT
+                sf = calc_sell_fees(_D(str(ltp)), _D(str(shrs)), _D(str(buy_px)), hd)
+                net_pnl = float(sf["net_proceeds"]) - total_paid
+                p["unrealized_pnl_npr"] = round(net_pnl, 2)
+                p["unrealized_pnl_pct"] = round(net_pnl / total_paid * 100, 2)
+                p["unrealized_pnl_net"] = True
+            else:
+                p["unrealized_pnl_pct"] = None
+                p["unrealized_pnl_npr"] = None
+
+        return {
+            "open_positions": open_positions,
+            "cash_balance": cash,
+            "live_flags": {"monitor": live_monitor, "auto_close": live_auto_close},
+        }
+    except Exception as e:
+        log.exception("portfolio failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Reporter ───────────────────────────────────────────────────────────────────
+
+_SQL_DANGER = _re.compile(
+    r'\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|COPY|GRANT|REVOKE|CREATE|CALL|'
+    r'EXECUTE|PREPARE|DEALLOCATE|DO|VACUUM|REINDEX|LOCK|ATTACH|DETACH|MERGE|'
+    r'REFRESH|LISTEN|NOTIFY|SET|RESET|SECURITY|ROLE|EXTENSION|PROGRAM)\b',
+    _re.IGNORECASE,
+)
+_PARAM_RE   = _re.compile(r':([a-zA-Z_][a-zA-Z0-9_]*)')
+
+
+def _check_sql(sql: str):
+    if _SQL_DANGER.search(sql):
+        raise HTTPException(status_code=400, detail="Only SELECT queries allowed.")
+
+
+def _build_psycopg2_sql(sql: str) -> str:
+    return _PARAM_RE.sub(r'%(\1)s', sql)
+
+
+class _SaveQueryBody(BaseModel):
+    name: str
+    description: Optional[str] = None
+    sql: str
+
+
+class _RunQueryBody(BaseModel):
+    sql: str
+    params: dict = {}
+
+
+class _DownloadBody(BaseModel):
+    sql: str
+    params: dict = {}
+    filename: str = "export"
+
+
+@app.get("/reporter/tables")
+def reporter_tables():
+    try:
+        with _db() as cur:
+            cur.execute("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                ORDER BY table_name
+            """)
+            tables = [r["table_name"] for r in (cur.fetchall() or [])]
+        return {"tables": tables}
+    except Exception as e:
+        log.exception("reporter_tables failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/reporter/sectors")
+def reporter_sectors():
+    try:
+        with _db() as cur:
+            cur.execute(
+                "SELECT DISTINCT sector FROM stocks WHERE sector IS NOT NULL ORDER BY sector"
+            )
+            rows = [r["sector"] for r in (cur.fetchall() or [])]
+        return {"sectors": rows}
+    except Exception as e:
+        log.exception("reporter_sectors failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/reporter/queries")
+def reporter_list_queries():
+    try:
+        with _db() as cur:
+            cur.execute(
+                "SELECT id, name, description, created_at FROM saved_queries ORDER BY id DESC"
+            )
+            rows = _rows(cur)
+        return {"queries": rows}
+    except Exception as e:
+        log.exception("reporter_list_queries failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reporter/queries")
+def reporter_save_query(body: _SaveQueryBody):
+    _check_sql(body.sql)
+    try:
+        with _db() as cur:
+            cur.execute(
+                "INSERT INTO saved_queries (name, description, sql) VALUES (%s, %s, %s) RETURNING id",
+                (body.name, body.description, body.sql),
+            )
+            row = cur.fetchone()
+        return {"id": row["id"], "name": body.name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("reporter_save_query failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/reporter/queries/{query_id}")
+def reporter_get_query(query_id: int):
+    try:
+        with _db() as cur:
+            cur.execute("SELECT * FROM saved_queries WHERE id = %s", (query_id,))
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Query not found")
+        return dict(row)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("reporter_get_query failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reporter/run")
+def reporter_run(body: _RunQueryBody):
+    _check_sql(body.sql)
+    try:
+        psql = _build_psycopg2_sql(body.sql)
+        params = {k: (v if v not in (None, "", []) else None) for k, v in body.params.items()}
+        with _db() as cur:
+            cur.execute(psql, params or None)
+            rows = _rows(cur)
+        return {"rows": rows, "count": len(rows)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("reporter_run failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/reporter/query")
+def reporter_query_get(request: Request, sql: str):
+    """
+    GET version of /reporter/run — accepts query parameters.
+
+    Usage examples:
+      http://localhost:8766/reporter/query?sql=SELECT * FROM market_log LIMIT 10
+      http://localhost:8766/reporter/query?sql=SELECT * FROM market_log WHERE symbol = :symbol&symbol=USHL
+      http://localhost:8766/reporter/query?sql=SELECT * FROM market_log WHERE engine_source = :engine&engine=v2
+
+    Parameters in SQL use :param_name syntax; pass matching query params (e.g., &symbol=RIDI).
+    """
+    _check_sql(sql)
+    try:
+        # Extract all query params except 'sql' itself
+        params = dict(request.query_params)
+        params.pop("sql", None)  # Remove the sql param from params dict
+
+        # Convert to proper types (attempt int/float if possible)
+        for k, v in params.items():
+            if v and isinstance(v, str):
+                try:
+                    params[k] = int(v)
+                except ValueError:
+                    try:
+                        params[k] = float(v)
+                    except ValueError:
+                        params[k] = v  # Keep as string
+
+        # Build psycopg2 SQL (:name -> %(name)s)
+        psql = _build_psycopg2_sql(sql)
+
+        # Execute query
+        with _db() as cur:
+            cur.execute(psql, params or None)
+            rows = _rows(cur)
+
+        return {"sql": sql, "params": params, "rows": rows, "count": len(rows)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("reporter_query_get failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reporter/download/csv")
+def reporter_download_csv(body: _DownloadBody):
+    _check_sql(body.sql)
+    try:
+        psql = _build_psycopg2_sql(body.sql)
+        params = {k: v for k, v in body.params.items() if v not in (None, "", [])}
+        with _db() as cur:
+            cur.execute(psql, params or None)
+            rows = _rows(cur)
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="No rows returned")
+
+        buf = _io.StringIO()
+        writer = _csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+        buf.seek(0)
+
+        filename = (body.filename or "export").strip()
+        if not filename.endswith(".csv"):
+            filename += ".csv"
+
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("reporter_download_csv failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reporter/download/xlsx")
+def reporter_download_xlsx(body: _DownloadBody):
+    _check_sql(body.sql)
+    try:
+        import openpyxl
+        psql = _build_psycopg2_sql(body.sql)
+        params = {k: v for k, v in body.params.items() if v not in (None, "", [])}
+        with _db() as cur:
+            cur.execute(psql, params or None)
+            rows = _rows(cur)
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="No rows returned")
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        headers = list(rows[0].keys())
+        ws.append(headers)
+        for row in rows:
+            ws.append([row.get(h) for h in headers])
+
+        buf = _io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        filename = (body.filename or "export").strip()
+        if not filename.endswith(".xlsx"):
+            filename += ".xlsx"
+
+        return StreamingResponse(
+            iter([buf.read()]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("reporter_download_xlsx failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── NRB Routes ────────────────────────────────────────────────────────────────
+
+@app.get("/nrb/periods")
+def get_nrb_periods():
+    try:
+        rows = read_tab("nrb_monthly") or []
+        rows.sort(key=lambda r: (r.get("fiscal_year",""), int(r.get("month_number") or 0)), reverse=True)
+        return {
+            "periods": [
+                {
+                    "period":       r.get("period"),
+                    "fiscal_year":  r.get("fiscal_year"),
+                    "month_number": r.get("month_number"),
+                    "inserted_at":  str(r.get("inserted_at", "")),
+                }
+                for r in rows
+            ]
+        }
+    except Exception as e:
+        log.exception("get_nrb_periods failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/nrb/upsert")
+def upsert_nrb(payload: NRBPayload):
+    try:
+        row = {
+            "period":                               payload.period,
+            "fiscal_year":                          payload.fiscal_year,
+            "month_number":                         payload.month_number,
+            "is_annual":                            payload.is_annual,
+            "policy_rate":                          _to_str(payload.policy_rate),
+            "bank_rate":                            _to_str(payload.bank_rate),
+            "crr_percentage":                       _to_str(payload.crr_percentage),
+            "slr_percentage":                       _to_str(payload.slr_percentage),
+            "lending_rate_pct":                     _to_str(payload.lending_rate_pct),
+            "deposit_rate_pct":                     _to_str(payload.deposit_rate_pct),
+            "interbank_rate_pct":                   _to_str(payload.interbank_rate_pct),
+            "tbill_91d_rate_pct":                   _to_str(payload.tbill_91d_rate_pct),
+            "cpi_inflation":                        _to_str(payload.cpi_inflation),
+            "credit_growth_rate":                   _to_str(payload.credit_growth_rate),
+            "private_sector_credit_growth_yoy_pct": _to_str(payload.private_sector_credit_growth_yoy_pct),
+            "m2_growth_yoy_pct":                    _to_str(payload.m2_growth_yoy_pct),
+            "deposit_growth_yoy_pct":               _to_str(payload.deposit_growth_yoy_pct),
+            "npl_ratio_pct":                        _to_str(payload.npl_ratio_pct),
+            "liquidity_injected_billion":           _to_str(payload.liquidity_injected_billion),
+            "liquidity_status":                     _to_str(payload.liquidity_status),
+            "remittance_yoy_change_pct":            _to_str(payload.remittance_yoy_change_pct),
+            "remittance_total_billion_npr":         _to_str(payload.remittance_total_billion_npr),
+            "fx_reserve_months":                    _to_str(payload.fx_reserve_months),
+            "usd_npr_rate":                         _to_str(payload.usd_npr_rate),
+            "bop_overall_balance_usd_m":            _to_str(payload.bop_overall_balance_usd_m),
+            "bop_current_account_usd_m":            _to_str(payload.bop_current_account_usd_m),
+            "bop_capital_account_usd_m":            _to_str(payload.bop_capital_account_usd_m),
+            "bop_trade_deficit_usd_m":              _to_str(payload.bop_trade_deficit_usd_m),
+            "bop_status":                           _to_str(payload.bop_status),
+            "bop_trend":                            _to_str(payload.bop_trend),
+            "bop_impact_on_nepse":                  _to_str(payload.bop_impact_on_nepse),
+            "nepse_index_value":                    _to_str(payload.nepse_index_value),
+            "nepse_index":                          _to_str(payload.nepse_index or payload.nepse_index_value),
+            "market_cap_billion_npr":               _to_str(payload.market_cap_billion_npr),
+            "overall_sentiment":                    _to_str(payload.overall_sentiment),
+            "forward_guidance":                     _to_str(payload.forward_guidance),
+            "key_risks":                            _to_str(payload.key_risks),
+        }
+        row = {k: v for k, v in row.items() if v is not None}
+        ok = upsert_row("nrb_monthly", row, conflict_columns=["period"])
+        if ok:
+            log.info("Upserted NRB record: %s", payload.period)
+            return {
+                "status":         "success",
+                "period":         payload.period,
+                "message":        f"NRB data for {payload.period} saved successfully.",
+                "fields_written": len(row),
+            }
+        else:
+            raise HTTPException(status_code=500, detail="upsert_row returned False")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("upsert_nrb failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stealth/watching")
+def get_stealth_watching():
+    try:
+        today = date.today()
+        with _db() as cur:
+            cur.execute("""
+                SELECT DISTINCT ON (symbol, broker_id) *
+                FROM stealth_signals
+                WHERE status = 'WATCHING'
+                ORDER BY symbol, broker_id, signal_date DESC
+            """)
+            rows = _rows(cur)
+
+        for r in rows:
+            if r.get("signal_date"):
+                try:
+                    sig_date = date.fromisoformat(str(r["signal_date"]))
+                    r["days_watching"] = (today - sig_date).days
+                except Exception:
+                    r["days_watching"] = None
+            else:
+                r["days_watching"] = None
+
+        return {"rows": rows, "count": len(rows)}
+    except Exception as e:
+        log.exception("stealth/watching failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stealth/triggered")
+def get_stealth_triggered():
+    try:
+        today = date.today()
+        with _db() as cur:
+            cur.execute("""
+                SELECT DISTINCT ON (s.symbol, s.broker_id) s.*,
+                    p.close AS current_price
+                FROM stealth_signals s
+                LEFT JOIN LATERAL (
+                    SELECT COALESCE(NULLIF(close,''), NULLIF(ltp,''))::float AS close
+                    FROM price_history
+                    WHERE symbol = s.symbol
+                    AND close IS NOT NULL AND close != ''
+                    AND close ~ '^[0-9]+\\.?[0-9]*$'
+                    ORDER BY date DESC
+                    LIMIT 1
+                ) p ON true
+                WHERE s.status = 'TRIGGERED'
+                ORDER BY s.symbol, s.broker_id, s.trigger_date DESC, s.signal_date DESC
+            """)
+            rows = _rows(cur)
+
+        for r in rows:
+            # Days since trigger
+            if r.get("trigger_date"):
+                try:
+                    tdate = date.fromisoformat(str(r["trigger_date"]))
+                    r["days_since_trigger"] = (today - tdate).days
+                except Exception:
+                    r["days_since_trigger"] = None
+
+            # Live return %
+            try:
+                tp = float(r["trigger_price"]) if r.get("trigger_price") else None
+                cp = float(r["current_price"]) if r.get("current_price") else None
+                if tp and cp and tp > 0:
+                    r["live_return_pct"] = round((cp - tp) / tp * 100, 2)
+                else:
+                    r["live_return_pct"] = None
+            except Exception:
+                r["live_return_pct"] = None
+
+        return {"rows": rows, "count": len(rows)}
+    except Exception as e:
+        log.exception("stealth/triggered failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stealth/history")
+def get_stealth_history():
+    try:
+        with _db() as cur:
+            cur.execute("""
+                SELECT * FROM stealth_signals
+                WHERE status = 'CLOSED'
+                ORDER BY close_date DESC
+            """)
+            rows = _rows(cur)
+
+        for r in rows:
+            # Days held (trigger → close)
+            try:
+                td = date.fromisoformat(str(r["trigger_date"])) if r.get("trigger_date") else None
+                cd = date.fromisoformat(str(r["close_date"]))   if r.get("close_date")   else None
+                r["days_held"] = (cd - td).days if (td and cd) else None
+            except Exception:
+                r["days_held"] = None
+
+            # WIN/LOSS
+            try:
+                rp = float(r["return_pct"]) if r.get("return_pct") else None
+                r["result"] = "WIN" if rp and rp > 0 else ("LOSS" if rp and rp < 0 else "BREAKEVEN")
+            except Exception:
+                r["result"] = None
+
+        # Summary stats
+        returns = []
+        for r in rows:
+            try:
+                rp = float(r["return_pct"]) if r.get("return_pct") else None
+                if rp is not None:
+                    returns.append(rp)
+            except Exception:
+                pass
+
+        win_rate   = round(sum(1 for x in returns if x > 0) / len(returns) * 100, 1) if returns else None
+        avg_return = round(sum(returns) / len(returns), 2) if returns else None
+        sorted_ret = sorted(returns)
+        median_ret = sorted_ret[len(sorted_ret)//2] if sorted_ret else None
+
+        return {
+            "rows":    rows,
+            "count":   len(rows),
+            "summary": {
+                "total_closed":  len(rows),
+                "win_rate":      win_rate,
+                "avg_return":    avg_return,
+                "median_return": median_ret,
+            }
+        }
+    except Exception as e:
+        log.exception("stealth/history failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stealth/stats")
+def get_stealth_stats():
+    try:
+        with _db() as cur:
+            cur.execute("SELECT * FROM stealth_signals ORDER BY signal_date DESC")
+            all_rows = _rows(cur)
+
+        brokers = {}
+        total_watching   = 0
+        total_triggered  = 0
+        total_closed     = 0
+        all_returns      = []
+
+        for r in all_rows:
+            bid  = str(r.get("broker_id", ""))
+            bname = r.get("broker_name", bid)
+            status = r.get("status", "")
+
+            if bid not in brokers:
+                brokers[bid] = {
+                    "broker_id":       bid,
+                    "broker_name":     bname,
+                    "signal_count":    0,
+                    "triggered_count": 0,
+                    "closed_count":    0,
+                    "returns":         [],
+                }
+
+            brokers[bid]["signal_count"] += 1
+
+            if status == "WATCHING":
+                total_watching += 1
+            elif status == "TRIGGERED":
+                total_triggered += 1
+                brokers[bid]["triggered_count"] += 1
+            elif status == "CLOSED":
+                total_closed += 1
+                brokers[bid]["triggered_count"] += 1
+                brokers[bid]["closed_count"]    += 1
+                try:
+                    rp = float(r["return_pct"]) if r.get("return_pct") else None
+                    if rp is not None:
+                        brokers[bid]["returns"].append(rp)
+                        all_returns.append(rp)
+                except Exception:
+                    pass
+
+        # Compute per-broker stats
+        broker_stats = []
+        for bid, b in brokers.items():
+            rets = b.pop("returns", [])
+            b["trigger_rate"] = round(b["triggered_count"] / b["signal_count"] * 100, 1) \
+                                if b["signal_count"] > 0 else None
+            b["avg_return"]   = round(sum(rets) / len(rets), 2) if rets else None
+            b["win_rate"]     = round(sum(1 for x in rets if x > 0) / len(rets) * 100, 1) \
+                                if rets else None
+            # Historical hit rates from grid search
+            hit_rates = {"56": 82.4, "48": 80.0, "49": 78.3, "38": 77.8, "58": 60.0}
+            b["validated_hit_rate"] = hit_rates.get(bid)
+            broker_stats.append(b)
+
+        broker_stats.sort(key=lambda x: -(x.get("validated_hit_rate") or 0))
+
+        # Overall stats
+        overall_hit_rate   = round(sum(1 for x in all_returns if x > 0) / len(all_returns) * 100, 1) if all_returns else None
+        overall_avg_return = round(sum(all_returns) / len(all_returns), 2) if all_returns else None
+        sorted_all         = sorted(all_returns)
+        overall_median     = sorted_all[len(sorted_all)//2] if sorted_all else None
+
+        return {
+            "broker_stats": broker_stats,
+            "overall": {
+                "total_signals":  len(all_rows),
+                "watching":       total_watching,
+                "triggered":      total_triggered,
+                "closed":         total_closed,
+                "hit_rate":       overall_hit_rate,
+                "avg_return":     overall_avg_return,
+                "median_return":  overall_median,
+            }
+        }
+    except Exception as e:
+        log.exception("stealth/stats failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+
+@app.get("/dashboard/logs/list")
+def get_logs_list():
+    try:
+        import glob as _glob
+        logs_dir = os.path.expanduser("~/nepse-engine/logs")
+        if not os.path.isdir(logs_dir):
+            return {"files": []}
+
+        files = []
+        for fpath in _glob.glob(os.path.join(logs_dir, "**", "main_*.log"), recursive=True):
+            try:
+                stat = os.stat(fpath)
+                mtime = stat.st_mtime
+                size = stat.st_size
+                rel_path = os.path.relpath(fpath, logs_dir)
+                dt = datetime.datetime.fromtimestamp(mtime)
+                files.append({
+                    "filename": os.path.basename(fpath),
+                    "path": rel_path.replace("\\", "/"),
+                    "date": dt.strftime("%Y-%m-%d"),
+                    "time": dt.strftime("%H:%M:%S"),
+                    "size": size,
+                })
+            except Exception:
+                pass
+
+        files.sort(key=lambda x: (x["date"], x["time"]), reverse=True)
+        return {"files": files}
+    except Exception as e:
+        log.exception("logs/list failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/dashboard/logs/file")
+def get_logs_file(path: str):
+    try:
+        logs_dir = os.path.expanduser("~/nepse-engine/logs")
+        fpath = os.path.normpath(os.path.join(logs_dir, path))
+
+        if not fpath.startswith(os.path.normpath(logs_dir)) or not os.path.isfile(fpath):
+            raise HTTPException(status_code=404, detail="File not found or access denied")
+
+        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+            raw_lines = f.readlines()
+
+        lines = []
+        for raw in raw_lines:
+            line = raw.rstrip("\n\r")
+
+            # Truncate raw: content
+            if "raw: " in line:
+                idx = line.find("raw: ")
+                prefix = line[:idx + 5]
+                content = line[idx + 5:]
+                if len(content) > 120:
+                    content = content[:120] + "…[truncated]"
+                line = prefix + content
+
+            # Truncate HTML
+            if "<!DOCTYPE" in line or "<!doctype" in line.lower():
+                idx = line.lower().find("<!doctype")
+                line = line[:idx] + "<!DOCTYPE...…[truncated]"
+            elif line.lstrip().startswith("<") and ("html" in line.lower() or "body" in line.lower()):
+                line = line[:100] + "…[truncated]" if len(line) > 100 else line
+
+            lines.append(line)
+
+        return {"lines": lines}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("logs/file failed: %s", e)
+
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+
+_SETTINGS_WHITELIST = {
+    "FILTER_V2_ENABLED", "FILTER_V2_TOP_N", "FILTER_V2_GATE_RESCUE",
+    "ENGINE_V1_ENABLED", "ENGINE_V2_ENABLED", "ENGINE_V3_ENABLED", "V3_GEMINI_ENABLED",
+    "TELEGRAM_ENABLED", "NOTIFY_CHANNEL",
+    "INDIA_NEPAL_RELATIONS", "GULF_STABILITY", "NRB_STANCE",
+    "GOVT_STABILITY", "LOAD_SHEDDING_HRS", "SEBON_EVENT", "BUDGET_EVENT",
+    "CLAUDE_MAX_CALLS_PER_DAY", "GEMINI_MAX_FLAGS", "CLAUDE_ANALYST_BACKEND",
+    "COUNCIL_USE_FREE_STACK",
+    "EMA_PULLBACK_ENABLED", "EMA_PULLBACK_WEIGHT",
+    "UPTREND_PULLBACK_ENABLED", "UPTREND_PULLBACK_WEIGHT",
+    "Trading_Days",
+    "RISK_REWARD_GATE_ENABLED",
+    "DASHBOARD_PUBLIC_AUTH_REQUIRED",
+    "LIVE_MONITOR_ENABLED", "LIVE_AUTO_CLOSE_ENABLED",
+    "EDIS_AUTO",
+}
+
+_SETTINGS_DEFAULTS: dict[str, str] = {
+    "FILTER_V2_ENABLED":     "false",
+    "FILTER_V2_TOP_N":       "3",
+    "FILTER_V2_GATE_RESCUE": "true",
+    "ENGINE_V1_ENABLED":     "true",
+    "ENGINE_V2_ENABLED":     "true",
+    "ENGINE_V3_ENABLED":     "false",
+    "V3_GEMINI_ENABLED":     "false",
+    "TELEGRAM_ENABLED":      "false",
+    "NOTIFY_CHANNEL":        "BOTH",
+    "INDIA_NEPAL_RELATIONS": "STABLE",
+    "GULF_STABILITY":        "STABLE",
+    "NRB_STANCE":            "UNCHANGED",
+    "GOVT_STABILITY":        "STABLE",
+    "LOAD_SHEDDING_HRS":     "0",
+    "SEBON_EVENT":           "",
+    "BUDGET_EVENT":          "",
+    "CLAUDE_MAX_CALLS_PER_DAY": "3",
+    "GEMINI_MAX_FLAGS": "3",
+    # Which transport the claude_analyst call uses: openrouter (default,
+    # OpenRouter HTTP) | cli (`claude -p` subscription) | auto (CLI first,
+    # OpenRouter fallback). Read per call — no restart needed.
+    "CLAUDE_ANALYST_BACKEND": "openrouter",
+    "COUNCIL_USE_FREE_STACK": "true",
+    "EMA_PULLBACK_ENABLED":     "false",
+    "EMA_PULLBACK_WEIGHT":      "0",
+    "UPTREND_PULLBACK_ENABLED": "false",
+    "UPTREND_PULLBACK_WEIGHT":  "0",
+    "Trading_Days":             "MON,TUE,WED,THU,FRI",
+    "RISK_REWARD_GATE_ENABLED": "true",
+    # Execution monitor — live book. LIVE_MONITOR_ENABLED gates whether the
+    # monitor loads portfolio (live) rows at all; LIVE_AUTO_CLOSE_ENABLED gates
+    # whether a guard trigger on a live row places a REAL ATrad SELL (off = alert
+    # only). The monitor reads both fresh every cycle — no restart needed.
+    "LIVE_MONITOR_ENABLED":     "true",
+    "LIVE_AUTO_CLOSE_ENABLED":  "false",
+    # Auto-EDIS — the 9 PM summary_workflow (LIVE mode only) delivers any
+    # shares sold that day to the broker pool account via Meroshare EDIS,
+    # confirming CGT holding days first where CDSC requires it. Read fresh
+    # each run. Off = you do EDIS manually in the Meroshare app.
+    "EDIS_AUTO":                "true",
+    # Fail-safe default: password still required on the public Funnel host
+    # until someone with private-network access flips this off via /settings
+    # (that route is itself blocked from public traffic — see
+    # _PUBLIC_BLOCKED_PREFIXES — so only a trusted-network caller can toggle it).
+    "DASHBOARD_PUBLIC_AUTH_REQUIRED": "true",
+}
+
+
+class SettingPayload(BaseModel):
+    value: str
+
+
+@app.get("/settings")
+def get_settings():
+    from sheets import get_setting as _gs
+    try:
+        result: dict = {k: _gs(k, v) for k, v in _SETTINGS_DEFAULTS.items()}
+
+        with _db() as cur:
+            cur.execute("""
+                SELECT
+                  COUNT(*) FILTER (WHERE engine_source IN ('v2','v2_rescue','BOTH')) AS total_v2,
+                  COUNT(*) FILTER (WHERE engine_source = 'v2_rescue')                 AS rescue,
+                  COUNT(*) FILTER (
+                    WHERE engine_source IN ('v2','v2_rescue','BOTH')
+                    AND   date = TO_CHAR(CURRENT_DATE,'YYYY-MM-DD')
+                  )                                                                   AS today_v2,
+                  COUNT(*) FILTER (WHERE primary_signal LIKE '%%_V2%%')               AS v2_signal_type
+                FROM market_log
+            """)
+            row = dict(cur.fetchone() or {})
+
+        result["v2_stats"] = {
+            "total":          int(row.get("total_v2")        or 0),
+            "rescue":         int(row.get("rescue")          or 0),
+            "today":          int(row.get("today_v2")        or 0),
+            "v2_signal_type": int(row.get("v2_signal_type")  or 0),
+        }
+        result["CIRCUIT_BREAKER"] = _gs("CIRCUIT_BREAKER", "")
+        return result
+    except Exception as e:
+        log.exception("get_settings failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/settings/{key}")
+def patch_setting(key: str, body: SettingPayload):
+    from sheets import update_setting as _us
+    if key not in _SETTINGS_WHITELIST:
+        raise HTTPException(status_code=403, detail=f"'{key}' is not dashboard-controllable")
+    try:
+        ok = _us(key, body.value.strip(), set_by="dashboard")
+        if not ok:
+            raise HTTPException(status_code=500, detail="update_setting returned False")
+        return {"key": key, "value": body.value.strip(), "updated": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("patch_setting(%s) failed: %s", key, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/settings/test-telegram")
+def settings_test_telegram():
+    try:
+        from helper.notifier import send_telegram as _st
+        from config import NST as _NST
+        import datetime as _dt
+        msg = (
+            f"✅ *NEPSE Dashboard — Connection Test*\n"
+            f"\U0001f551 {_dt.datetime.now(tz=_NST).strftime('%Y-%m-%d %H:%M NST')}\n"
+            f"\U0001f4e1 Telegram connected"
+        )
+        sent = _st(msg, parse_mode="Markdown")
+        return {"sent": sent}
+    except Exception as e:
+        log.exception("test_telegram failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/settings/reset-circuit-breaker")
+def settings_reset_circuit_breaker():
+    from sheets import update_setting as _us
+    try:
+        _us("CIRCUIT_BREAKER", "", set_by="dashboard")
+        return {"reset": True}
+    except Exception as e:
+        log.exception("reset_circuit_breaker failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Trading Mode Switch ───────────────────────────────────────────────────
+
+class TradingModeSwitchPayload(BaseModel):
+    confirm: str
+
+
+@app.get("/settings/trading-mode")
+def get_trading_mode():
+    from sheets import get_setting as _gs
+    paper = _gs("PAPER_MODE", "true").lower() == "true"
+    return {
+        "paper_mode":     paper,
+        "mode":           "PAPER" if paper else "LIVE",
+        "confirm_phrase": "SWITCH TO LIVE" if paper else "SWITCH TO PAPER",
+    }
+
+
+@app.post("/settings/trading-mode/switch")
+def switch_trading_mode(body: TradingModeSwitchPayload):
+    from sheets import get_setting as _gs, update_setting as _us
+
+    current_paper   = _gs("PAPER_MODE", "true").lower() == "true"
+    required_phrase = "SWITCH TO LIVE" if current_paper else "SWITCH TO PAPER"
+
+    if body.confirm.strip() != required_phrase:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Phrase mismatch. Expected: '{required_phrase}'"
+        )
+
+    new_val = "false" if current_paper else "true"
+    ok = _us("PAPER_MODE", new_val, set_by="dashboard")
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to update PAPER_MODE")
+
+    # Restart execution monitor so it picks up the new mode immediately
+    restart_ok  = False
+    restart_msg = "not attempted"
+    try:
+        uid = os.getuid()
+        env = {**os.environ, "XDG_RUNTIME_DIR": f"/run/user/{uid}"}
+        env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{uid}/bus")
+        result = subprocess.run(
+            ["systemctl", "--user", "restart", "nepse-monitor.service"],
+            env=env, capture_output=True, text=True, timeout=15,
+        )
+        restart_ok  = result.returncode == 0
+        restart_msg = (result.stderr.strip() or result.stdout.strip() or "OK") if not restart_ok else "OK"
+    except Exception as e:
+        restart_msg = str(e)
+
+    log.info("Trading mode switched to %s | monitor_restart=%s %s",
+             "PAPER" if not current_paper else "LIVE", restart_ok, restart_msg)
+
+    return {
+        "switched":          True,
+        "new_mode":          "LIVE" if current_paper else "PAPER",
+        "monitor_restarted": restart_ok,
+        "restart_msg":       restart_msg,
+    }
+
+
+# ── Engine Version Toggle ─────────────────────────────────────────────────
+
+@app.get("/engine-versions")
+def get_engine_versions():
+    """Get current engine version activation status."""
+    from sheets import get_setting
+    try:
+        v1_enabled        = get_setting("ENGINE_V1_ENABLED",  "true").lower()  == "true"
+        v2_enabled        = get_setting("ENGINE_V2_ENABLED",  "true").lower()  == "true"
+        v3_enabled        = get_setting("ENGINE_V3_ENABLED",  "false").lower() == "true"
+        v3_gemini_enabled = get_setting("V3_GEMINI_ENABLED",  "false").lower() == "true"
+
+        return {
+            "v1": {"enabled": v1_enabled, "name": "Filter v1 (Snapshot)", "description": "Baseline indicator scoring at T0"},
+            "v2": {"enabled": v2_enabled, "name": "Filter v2 (Progression)", "description": "6-day trend-based slope analysis"},
+            "v3": {
+                "enabled":        v3_enabled,
+                "gemini_enabled": v3_gemini_enabled,
+                "name":           "Filter v3 (Oversold Recovery)",
+                "description":    "Detects false tech_score blocks via recovery patterns",
+            },
+        }
+    except Exception as e:
+        log.exception("get_engine_versions failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/engine-versions")
+def set_engine_versions(payload: dict):
+    """
+    Set engine version activation.
+    Payload: {"v1": bool, "v2": bool, "v3": bool}
+    At least one engine must remain enabled.
+    """
+    from sheets import update_setting as _us
+    try:
+        v1               = payload.get("v1", True)
+        v2               = payload.get("v2", True)
+        v3               = payload.get("v3", False)
+        v3_gemini        = payload.get("v3_gemini", False)
+
+        # Validation: at least one must be enabled
+        if not any([v1, v2, v3]):
+            raise HTTPException(status_code=400, detail="At least one engine version must be enabled")
+
+        # v3_gemini can only be on if v3 scoring is on
+        if v3_gemini and not v3:
+            raise HTTPException(status_code=400, detail="V3_GEMINI_ENABLED requires ENGINE_V3_ENABLED to be true")
+
+        _us("ENGINE_V1_ENABLED", "true" if v1        else "false", set_by="dashboard")
+        _us("ENGINE_V2_ENABLED", "true" if v2        else "false", set_by="dashboard")
+        _us("ENGINE_V3_ENABLED", "true" if v3        else "false", set_by="dashboard")
+        _us("V3_GEMINI_ENABLED", "true" if v3_gemini else "false", set_by="dashboard")
+
+        log.info("Engine versions toggled: v1=%s, v2=%s, v3=%s, v3_gemini=%s", v1, v2, v3, v3_gemini)
+        return {
+            "success":   True,
+            "v1":        v1,
+            "v2":        v2,
+            "v3":        v3,
+            "v3_gemini": v3_gemini,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("set_engine_versions failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))

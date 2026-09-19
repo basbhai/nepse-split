@@ -1,0 +1,28 @@
+[Unit]
+Description=NEPSE AI — Trading Loop (every 6 min during market hours)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=%i
+WorkingDirectory=/opt/nepse-engine
+# Default: paper mode. Change to -live when ready.
+ExecStart=/opt/nepse-engine/venv/bin/python main.py -paper
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nepse-trading
+EnvironmentFile=/opt/nepse-engine/.env
+
+# Allow up to 15 min runtime per cycle. Baseline OpenRouter cycle ~124s; the
+# `claude -p` CLI analyst backend (CLAUDE_ANALYST_BACKEND=cli/auto) call
+# latency tracks learning_hub lesson volume (see claude_analyst.CLI_LESSON_LIMIT)
+# and, as of 2026-09-15, real calls run 70-120s per flag with CLI_TIMEOUT_SEC=120s
+# + 1 retry — worst case 3 flags (MAX_FLAGS_FOR_CLAUDE) x 2 attempts x 120s = 720s,
+# so 900s leaves ~180s of buffer for Gemini/scraper/DB overhead. A hung cycle is
+# killed here; the next oneshot run is unaffected. Re-check this math if
+# CLI_TIMEOUT_SEC, CLI_LESSON_LIMIT, or MAX_FLAGS_FOR_CLAUDE change again.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

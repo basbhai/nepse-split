@@ -1,0 +1,13 @@
+[Unit]
+Description=NEPSE AI — Sleep Scheduler Timer (May 2026)
+
+[Timer]
+# 3:05 PM NST = 09:20 UTC — after market closes, before summary_workflow at 9 PM
+OnCalendar=Mon,Tue,Wed,Thu,Fri 09:20:00 UTC
+# Sunday: 6:15 PM NST = 12:30 UTC — after weekly review
+OnCalendar=Sun 12:30:00 UTC
+Persistent=false
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target

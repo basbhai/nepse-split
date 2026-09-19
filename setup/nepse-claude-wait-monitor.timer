@@ -1,0 +1,22 @@
+[Unit]
+Description=NEPSE AI — Claude Wait-Condition Monitor Timer (11:30 AM + 1:15 PM NST, after each indicator refresh)
+Documentation=file:///home/shanvi/nepse-engine/agents/claude_wait_monitor/wait_monitor_prompt.md
+
+[Timer]
+# Two fires a day, each ~15-30 min after an indicator refresh so the monitor
+# always reads fresh post-refresh data rather than a stale snapshot:
+#   11:30 AM NST = 05:45 UTC — shortly after market open (11:00 AM) and the
+#     morning_workflow indicators run (10:15 AM), catching early-session
+#     WAIT-condition resolutions.
+#   1:15 PM NST  = 07:30 UTC — 15 min after nepse-indicators-refresh.timer
+#     (1:00 PM NST), the intraday indicator refresh.
+# Fires every day; the wrapper script itself gates on calendar_guard.is_trading_day()
+# so holidays are correctly skipped, not just weekends (unlike a hardcoded Mon-Fri
+# OnCalendar, which would miss holiday awareness).
+OnCalendar=*-*-* 05:45:00 UTC
+OnCalendar=*-*-* 07:30:00 UTC
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
