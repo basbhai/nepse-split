@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/shanvi/nepse-engine
-ExecStart=/home/shanvi/nepse-engine/venv/bin/python -m modules.execution_monitor
+WorkingDirectory=/opt/nepse-trading
+ExecStart=/opt/nepse-trading/venv/bin/python -m modules.execution_monitor
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=nepse-monitor
-EnvironmentFile=/home/shanvi/nepse-engine/.env
+EnvironmentFile=/opt/nepse-trading/.env
 TimeoutStartSec=600
 Restart=on-failure
 RestartSec=30

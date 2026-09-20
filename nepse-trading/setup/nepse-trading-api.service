@@ -1,0 +1,21 @@
+[Unit]
+Description=NEPSE Trading API (FastAPI port 8767 — serves engine REST calls)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nepse-trading
+ExecStart=/opt/nepse-trading/venv/bin/python -m uvicorn trading_api:app --host 0.0.0.0 --port 8767
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nepse-trading-api
+EnvironmentFile=/opt/nepse-trading/.env
+
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

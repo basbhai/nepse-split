@@ -1,44 +1,47 @@
-
-logs/
-.playwright-mcp/
-service_account.json
-nepse_env/
-venv/
-.env/
-.venv/
-results/
-graphify-out/
-prompt/
-
-data/
-!agents/claude_wait_monitor/
-!agents/claude_agent/
-.openclaw/
-tools/
-wsl_venv/
+# Python
 __pycache__/
-output/
-*.pyc
+*.py[cod]
 *.pyo
-.DS_Store
-Thumbs.db
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Environment / secrets
 .env
-nrb_pdfs/
-*.csv
-research/
+*.env.local
 
-*.sql/
-documents/
-SQL backup/
+# Logs
+logs/
+*.log
 
-*.bak
-*.md
-!agents/claude_wait_monitor/*.md
-!agents/claude_agent/*.md
+# Captcha / temp images
+captcha.png
+captcha_*.png
+tms_captcha_*.png
 
-
-*.sql
+# DB / data dumps
+*.sql.bak
 *.dump
 
-scratchpad*/
+# OS
+.DS_Store
+Thumbs.db
 
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Playwright
+playwright-report/
+test-results/
+
+# Pytest / coverage
+.pytest_cache/
+htmlcov/
+.coverage

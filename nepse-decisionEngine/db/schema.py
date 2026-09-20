@@ -37,10 +37,6 @@ TABS: dict[str, str] = {
     "fd_rate_summary": "fd_rate_summary",
     "international_prices": "international_prices",
     "share_sectors": "share_sectors",
-    "paper_users": "paper_users",
-    "paper_capital": "paper_capital",
-    "paper_portfolio": "paper_portfolio",
-    "paper_trade_log": "paper_trade_log",
     "gate_misses": "gate_misses",
     "gate_proposals": "gate_proposals",
     "claude_audit": "claude_audit",
@@ -1124,118 +1120,6 @@ TABLE_DDL: dict[str, str] = {
     );
     """,
 
-    "paper_users": """
-    CREATE TABLE IF NOT EXISTS "paper_users" (
-        id SERIAL PRIMARY KEY,
-        telegram_id TEXT NOT NULL,
-        discord_id TEXT,
-        username TEXT,
-        full_name TEXT,
-        status TEXT DEFAULT 'PENDING',
-        registered_at TEXT,
-        approved_at TEXT,
-        approved_by TEXT,
-        inserted_at TIMESTAMPTZ DEFAULT NOW(),
-        CONSTRAINT ux_paper_users_telegram_id UNIQUE (telegram_id)
-    );
-    CREATE INDEX IF NOT EXISTS ix_paper_users_status
-        ON "paper_users" (status);
-    CREATE INDEX IF NOT EXISTS ix_paper_users_discord_id
-        ON "paper_users" (discord_id);
-    """,
-
-    "paper_capital": """
-    CREATE TABLE IF NOT EXISTS "paper_capital" (
-        id SERIAL PRIMARY KEY,
-        telegram_id TEXT NOT NULL,
-        starting_capital TEXT DEFAULT '100000',
-        current_capital TEXT DEFAULT '100000',
-        total_realised_pnl TEXT DEFAULT '0',
-        total_fees_paid TEXT DEFAULT '0',
-        total_cgt_paid TEXT DEFAULT '0',
-        total_trades TEXT DEFAULT '0',
-        total_wins TEXT DEFAULT '0',
-        total_losses TEXT DEFAULT '0',
-        last_updated TEXT,
-        test_mode TEXT DEFAULT 'false',
-        inserted_at TIMESTAMPTZ DEFAULT NOW(),
-        CONSTRAINT ux_paper_capital_telegram_id UNIQUE (telegram_id)
-    );
-    CREATE INDEX IF NOT EXISTS ix_paper_capital_telegram_id
-        ON "paper_capital" (telegram_id);
-    """,
-
-    "paper_portfolio": """
-    CREATE TABLE IF NOT EXISTS "paper_portfolio" (
-        id SERIAL PRIMARY KEY,
-        telegram_id TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        status TEXT DEFAULT 'OPEN',
-        total_shares TEXT,
-        wacc TEXT,
-        total_cost TEXT,
-        first_buy_date TEXT,
-        last_buy_date TEXT,
-        buy_count TEXT DEFAULT '1',
-        exit_date TEXT,
-        exit_price TEXT,
-        exit_shares TEXT,
-        gross_pnl TEXT,
-        sell_fees TEXT,
-        cgt_paid TEXT,
-        net_pnl TEXT,
-        result TEXT,
-        created_at TEXT,
-        updated_at TEXT,
-        test_mode TEXT DEFAULT 'false',
-        audited TEXT DEFAULT 'false',
-        peak_price TEXT,
-        trail_active TEXT DEFAULT 'false',
-        inserted_at TIMESTAMPTZ DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS ix_paper_portfolio_telegram_id
-        ON "paper_portfolio" (telegram_id);
-    CREATE INDEX IF NOT EXISTS ix_paper_portfolio_telegram_id_status
-        ON "paper_portfolio" (telegram_id, status);
-    CREATE INDEX IF NOT EXISTS ix_paper_portfolio_symbol
-        ON "paper_portfolio" (symbol);
-    CREATE INDEX IF NOT EXISTS ix_paper_portfolio_test_mode
-        ON "paper_portfolio" (test_mode);
-    """,
-
-    "paper_trade_log": """
-    CREATE TABLE IF NOT EXISTS "paper_trade_log" (
-        id SERIAL PRIMARY KEY,
-        telegram_id TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        action TEXT NOT NULL,
-        shares TEXT,
-        price TEXT,
-        gross_amount TEXT,
-        brokerage TEXT,
-        sebon TEXT,
-        dp_fee TEXT,
-        cgt TEXT,
-        total_fees TEXT,
-        net_amount TEXT,
-        capital_before TEXT,
-        capital_after TEXT,
-        wacc_before TEXT,
-        wacc_after TEXT,
-        note TEXT,
-        created_at TEXT,
-        test_mode TEXT DEFAULT 'false',
-        close_type TEXT DEFAULT 'MANUAL',
-        inserted_at TIMESTAMPTZ DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS ix_paper_trade_log_telegram_id
-        ON "paper_trade_log" (telegram_id);
-    CREATE INDEX IF NOT EXISTS ix_paper_trade_log_symbol
-        ON "paper_trade_log" (symbol);
-    CREATE INDEX IF NOT EXISTS ix_paper_trade_log_test_mode
-        ON "paper_trade_log" (test_mode);
-    """,
-
     "gate_misses": """
     CREATE TABLE IF NOT EXISTS "gate_misses" (
         id SERIAL PRIMARY KEY,
@@ -1833,10 +1717,6 @@ TABLE_COLUMNS: dict[str, list[str]] = {
     "fd_rate_summary": ["fetch_date", "avg_rate_pct", "max_rate_pct", "min_rate_pct", "benchmark_rate_pct", "benchmark_products", "best_bank_name", "best_bank_rate", "best_tenure", "rate_vs_prev_pct", "rate_direction", "fd_score_signal", "total_products"],
     "international_prices": ["date", "variable_name", "close_price", "source"],
     "share_sectors": ["externalid", "companyname", "symbol", "securityname", "status", "companyemail", "website", "sectorname", "regulatorybody", "instrumenttype"],
-    "paper_users": ["telegram_id", "discord_id", "username", "full_name", "status", "registered_at", "approved_at", "approved_by"],
-    "paper_capital": ["telegram_id", "starting_capital", "current_capital", "total_realised_pnl", "total_fees_paid", "total_cgt_paid", "total_trades", "total_wins", "total_losses", "last_updated", "test_mode"],
-    "paper_portfolio": ["telegram_id", "symbol", "status", "total_shares", "wacc", "total_cost", "first_buy_date", "last_buy_date", "buy_count", "exit_date", "exit_price", "exit_shares", "gross_pnl", "sell_fees", "cgt_paid", "net_pnl", "result", "created_at", "updated_at", "test_mode", "audited", "peak_price", "trail_active"],
-    "paper_trade_log": ["telegram_id", "symbol", "action", "shares", "price", "gross_amount", "brokerage", "sebon", "dp_fee", "cgt", "total_fees", "net_amount", "capital_before", "capital_after", "wacc_before", "wacc_after", "note", "created_at", "test_mode", "close_type"],
     "gate_misses": ["date", "symbol", "sector", "gate_reason", "gate_category", "price_at_block", "market_state", "tech_score", "conf_score", "volume_os_ratio", "vwap_dev", "bid_ask_ratio", "dpr_proximity", "composite_score_would_be", "tracking_days", "outcome", "outcome_return_pct", "outcome_stamped_at", "decision", "max_high_20d", "max_drawdown_20d", "peak_day", "would_have_caught", "outcome_tier", "engine_source"],
     "gate_proposals": ["review_week", "proposal_number", "parameter_name", "current_value", "proposed_value", "reasoning", "false_block_rate", "sample_size", "status", "decided_at", "applied_at"],
     "claude_audit": ["review_week", "buy_count", "buy_win_rate", "buy_avg_return", "wait_count", "wait_accuracy", "wait_evaluated_count", "avoid_count", "avoid_accuracy", "avoid_evaluated_count", "false_avoid_rate", "missed_entry_rate", "overall_accuracy", "macro_accuracy", "audit_summary"],

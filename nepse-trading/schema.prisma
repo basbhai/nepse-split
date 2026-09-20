@@ -1,0 +1,300 @@
+// schema.prisma — nepse-trading
+// Trading service tables only. Engine tables are in nepse-engine/schema.prisma.
+// Edit here, then run: python -m db.codegen → python -m db.migrations
+//
+// Type conventions (same as engine):
+//   Text     — nullable TEXT column
+//   Text!    — NOT NULL TEXT column
+//   Serial   — SERIAL PRIMARY KEY
+//   Boolean  — stored as TEXT 'true'/'false' (project-wide convention)
+//
+// Tables owned by this service:
+//   GROUP 1 — Identity:        users, user_channels
+//   GROUP 2 — User Services:   user_meroshare, user_broker, user_broker_links, user_signal_preferences
+//   GROUP 6 — Op Logs:         signal_deliveries
+//   PAPER   — Migrated:        paper_users (legacy, retire after migration), paper_capital,
+//                              paper_portfolio, paper_trade_log
+//
+// Groups 3 (subscriptions) and 4 (auth tokens/OTP) are deferred — see tasks.md T25.
+// paper_users is kept alive only during migration; drop after all bot code uses user_id.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GROUP 1 — IDENTITY
+// ─────────────────────────────────────────────────────────────────────────────
+
+model users {
+  id             Serial
+  full_name      Text!
+  email          Text
+  phone          Text
+  kyc_name       Text           // name as it appears in CDSC/broker KYC (may differ from full_name)
+  status         Text!  @default("PENDING")   // PENDING | APPROVED | BLOCKED
+  role           Text!  @default("USER")      // USER | ADMIN
+  notes          Text
+  created_at     Text           // YYYY-MM-DD HH:MM:SS NST
+  approved_at    Text
+  approved_by    Text           // users.id of the admin who approved (stored as TEXT, no FK constraint)
+  last_active_at Text
+
+  @@index([status])
+  @@index([role])
+}
+
+// One user can have Telegram + Discord + web all linked. Every bot command
+// resolves platform_user_id to users.id via this table.
+// Replaces telegram_id and discord_id columns on paper_users.
+model user_channels {
+  id               Serial
+  user_id          Text!          // → users.id
+  platform         Text!          // telegram | discord | web
+  platform_user_id Text!          // Telegram chat ID / Discord snowflake / web username
+  username         Text           // @handle (platform-specific display name)
+  is_primary       Text  @default("false")
+  linked_at        Text           // YYYY-MM-DD HH:MM:SS NST
+
+  @@unique([platform, platform_user_id])
+  @@index([user_id])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GROUP 2 — USER SERVICES
+// ─────────────────────────────────────────────────────────────────────────────
+
+model user_meroshare {
+  id               Serial
+  user_id          Text!          // → users.id
+  label            Text           // user-defined: 'My DEMAT', 'Joint Account'
+  dp_id            Text!          // MEROSHARE_DP_ID e.g. '13200'
+  demat_number     Text!          // MEROSHARE_DEMAT e.g. '1301180000232764'
+  client_code      Text!          // MEROSHARE_CLIENT_CODE e.g. '11800'
+  username         Text!          // MEROSHARE_USERNAME
+  password_enc     Text!          // MEROSHARE_PASSWORD — Fernet encrypted
+  is_active        Text  @default("true")
+  is_primary       Text  @default("false")
+  last_verified_at Text           // last successful Meroshare API login (YYYY-MM-DD HH:MM:SS NST)
+  last_synced_at   Text           // last successful portfolio sync
+  notes            Text
+  created_at       Text           // YYYY-MM-DD HH:MM:SS NST
+
+  @@index([user_id])
+}
+
+// ATrade / TMS broker credentials per user. One user can have accounts at
+// multiple brokers. account_type splits one broker into ORDER and DATA
+// sessions (prevents market watch polling from sharing a session with live orders).
+model user_broker {
+  id                   Serial
+  user_id              Text!       // → users.id
+  label                Text        // user-defined: 'Roadshow - Order', 'Merolagani'
+  broker_name          Text!       // e.g. 'Roadshow Securities'
+  broker_code          Text!       // e.g. 'BS92009'
+  tms_base_url         Text!       // e.g. 'https://tms.roadshowsecurities.com.np/atsweb'
+  username             Text!       // TMS_ROADSHOW_USER
+  password_enc         Text!       // TMS_ROADSHOW_PASS — Fernet encrypted
+  acnt_id              Text        // TMS_ROADSHOW_ACNT_ID (for order placement)
+  watch_id             Text        // TMS_ROADSHOW_WATCH_ID (market watch session ID)
+  client_code          Text        // broker client account number
+  account_type         Text  @default("both")
+                               // order | data | both
+                               // 'order': place_order / place_sell_order only
+                               // 'data':  market watch and quotes only
+                               // 'both':  single session does everything (legacy)
+  is_active            Text  @default("true")
+  is_primary           Text  @default("false")
+  auto_execute_enabled Text  @default("false")
+  max_auto_buy_npr     Text  @default("0")   // per-signal NPR cap; 0 = disabled
+  last_verified_at     Text
+  notes                Text
+  created_at           Text        // YYYY-MM-DD HH:MM:SS NST
+
+  @@index([user_id])
+  @@index([account_type])
+}
+
+// Custom action links per broker account — roadshow URLs, rights offering links,
+// kitta transfer links. Surfaced in bot on signal push.
+model user_broker_links {
+  id         Serial
+  user_id    Text!           // → users.id
+  broker_id  Text!           // → user_broker.id (application-enforced CASCADE on delete)
+  link_type  Text!           // ROADSHOW | RIGHTS | KITTA_TRANSFER | ALLOTMENT_CHECK | OTHER
+  label      Text!           // e.g. 'Roadshow - GBIME', 'Rights - NLG'
+  url        Text!
+  is_active  Text  @default("true")
+  notes      Text
+  created_at Text            // YYYY-MM-DD HH:MM:SS NST
+
+  @@index([user_id])
+  @@index([broker_id])
+}
+
+// Signal routing and auto-execute config. One row per user (1:1 with users).
+// Created automatically when admin approves a user (task T22).
+model user_signal_preferences {
+  id                      Serial
+  user_id                 Text!  @unique    // → users.id
+  notify_telegram         Text   @default("true")
+  notify_discord          Text   @default("false")
+  channel_priority        Text   @default("telegram")  // telegram | discord
+  auto_execute            Text   @default("false")
+  auto_execute_broker_id  Text               // → user_broker.id (nullable, NULL = auto-execute off)
+  signal_filter           Text   @default("ALL")  // ALL | BUY_ONLY | WAIT_ONLY
+  min_score_threshold     Text   @default("0")    // skip push if composite_score below this
+  created_at              Text
+  updated_at              Text
+
+  @@index([user_id])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SYSTEM CONFIG
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Runtime configuration — read by get_setting() throughout the trading service.
+// Seed rows written by db/migrations.py on first run.
+model settings {
+  id           Serial
+  key          Text!  @unique
+  value        Text
+  description  Text
+  last_updated Text
+  set_by       Text
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GROUP 6 — OPERATIONAL LOGS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Delivery record per user per signal. UNIQUE constraint prevents double-push on restart.
+// Dedup pattern: INSERT ... ON CONFLICT DO NOTHING — 0 rows affected = already sent, skip.
+model signal_deliveries {
+  id           Serial
+  user_id      Text!           // → users.id
+  signal_date  Text!           // YYYY-MM-DD
+  symbol       Text!
+  channel      Text!           // telegram | discord
+  status       Text!           // SENT | FAILED | SKIPPED
+  sent_at      Text
+  error_msg    Text
+
+  @@unique([signal_date, symbol, user_id, channel])
+  @@index([user_id])
+  @@index([signal_date])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAPER TRADING — Migrated from nepse-engine (engine no longer owns these)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// LEGACY — Being retired. Replaced by users + user_channels.
+// Kept alive only during migration. Drop after all bot queries use user_id.
+model paper_users {
+  id            Serial
+  telegram_id   Text!  @unique
+  discord_id    Text
+  username      Text
+  full_name     Text
+  status        Text   @default("PENDING")   // PENDING | APPROVED | DENIED
+  registered_at Text
+  approved_at   Text
+  approved_by   Text
+
+  @@index([status])
+  @@index([discord_id])
+}
+
+// All monetary values stored as TEXT (Decimal in Python — never float()).
+// user_id added as new join key; telegram_id kept as legacy during migration.
+// /reset deletes this row and reinserts with starting_capital='100000'.
+model paper_capital {
+  id                  Serial
+  user_id             Text           // → users.id (nullable until backfilled from paper_users)
+  telegram_id         Text!  @unique // legacy — kept during migration
+  starting_capital    Text   @default("100000")
+  current_capital     Text   @default("100000")
+  total_realised_pnl  Text   @default("0")
+  total_fees_paid     Text   @default("0")
+  total_cgt_paid      Text   @default("0")
+  total_trades        Text   @default("0")
+  total_wins          Text   @default("0")
+  total_losses        Text   @default("0")
+  last_updated        Text
+  test_mode           Text   @default("false")
+
+  @@index([user_id])
+  @@index([telegram_id])
+}
+
+// One OPEN row per (user_id, symbol). Multiple CLOSED rows per symbol allowed.
+// WACC averaging requires explicit OPEN row detection — never use upsert.
+// peak_price and trail_active updated every 30s by execution_monitor.
+// audited='false' rows are the queue for engine auditor (shared Postgres read).
+model paper_portfolio {
+  id              Serial
+  user_id         Text           // → users.id (nullable until backfilled)
+  telegram_id     Text!          // legacy — kept during migration
+  symbol          Text!
+  status          Text   @default("OPEN")    // OPEN | CLOSED
+  total_shares    Text
+  wacc            Text           // weighted average cost (4 dp)
+  total_cost      Text           // total capital deployed including fees
+  first_buy_date  Text           // YYYY-MM-DD — used for CGT hold-period calc
+  last_buy_date   Text
+  buy_count       Text   @default("1")
+  exit_date       Text
+  exit_price      Text
+  exit_shares     Text
+  gross_pnl       Text
+  sell_fees       Text
+  cgt_paid        Text
+  net_pnl         Text
+  result          Text           // WIN | LOSS | BREAKEVEN
+  created_at      Text
+  updated_at      Text
+  test_mode       Text   @default("false")
+  audited         Text   @default("false")
+  peak_price      Text
+  trail_active    Text   @default("false")
+  portfolio_id    Text           // FK → paper_portfolio.id for paper_trade_log linkage (nullable)
+
+  @@index([user_id])
+  @@index([user_id, status])
+  @@index([telegram_id])
+  @@index([symbol])
+  @@index([test_mode])
+}
+
+// Append-only. One row per BUY or SELL event. Never update_row() on this table.
+// Written atomically inside execute_buy / execute_sell alongside portfolio update.
+// System account rows (telegram_id='SYSTEM_BOT') are the learning hub training source.
+model paper_trade_log {
+  id             Serial
+  user_id        Text           // → users.id (nullable until backfilled)
+  telegram_id    Text!          // legacy — kept during migration
+  portfolio_id   Text           // → paper_portfolio.id (nullable for pre-migration rows)
+  symbol         Text!
+  action         Text!          // BUY | SELL
+  shares         Text
+  price          Text
+  gross_amount   Text
+  brokerage      Text
+  sebon          Text
+  dp_fee         Text
+  cgt            Text
+  total_fees     Text
+  net_amount     Text
+  capital_before Text
+  capital_after  Text
+  wacc_before    Text
+  wacc_after     Text
+  note           Text
+  created_at     Text
+  test_mode      Text   @default("false")
+  close_type     Text   @default("MANUAL")   // MANUAL | HARD_STOP | TRAIL_STOP | PARTIAL
+
+  @@index([user_id])
+  @@index([telegram_id])
+  @@index([portfolio_id])
+  @@index([symbol])
+  @@index([test_mode])
+}

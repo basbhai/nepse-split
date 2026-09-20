@@ -1157,100 +1157,10 @@ model share_sectors {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PAPER TRADING
+// PAPER TRADING — MOVED TO nepse-trading/schema.prisma
+// paper_users, paper_capital, paper_portfolio, paper_trade_log are now owned
+// by the trading service. Engine reads these tables via REST only.
 // ─────────────────────────────────────────────────────────────────────────────
-
-model paper_users {
-  id            Serial
-  telegram_id   Text!  @unique
-  discord_id    Text
-  username      Text
-  full_name     Text
-  status        Text   @default("PENDING")
-  registered_at Text
-  approved_at   Text
-  approved_by   Text
-
-  @@index([status])
-  @@index([discord_id])
-}
-
-model paper_capital {
-  id                  Serial
-  telegram_id         Text!  @unique
-  starting_capital    Text  @default("100000")
-  current_capital     Text  @default("100000")
-  total_realised_pnl  Text  @default("0")
-  total_fees_paid     Text  @default("0")
-  total_cgt_paid      Text  @default("0")
-  total_trades        Text  @default("0")
-  total_wins          Text  @default("0")
-  total_losses        Text  @default("0")
-  last_updated        Text
-  test_mode           Text  @default("false")
-
-  @@index([telegram_id])
-}
-
-model paper_portfolio {
-  id              Serial
-  telegram_id     Text!
-  symbol          Text!
-  status          Text  @default("OPEN")
-  total_shares    Text
-  wacc            Text
-  total_cost      Text
-  first_buy_date  Text
-  last_buy_date   Text
-  buy_count       Text  @default("1")
-  exit_date       Text
-  exit_price      Text
-  exit_shares     Text
-  gross_pnl       Text
-  sell_fees       Text
-  cgt_paid        Text
-  net_pnl         Text
-  result          Text
-  created_at      Text
-  updated_at      Text
-  test_mode       Text  @default("false")
-  audited         Text  @default("false")
-  peak_price      Text
-  trail_active    Text  @default("false")
-
-  @@index([telegram_id])
-  @@index([telegram_id, status])
-  @@index([symbol])
-  @@index([test_mode])
-}
-
-model paper_trade_log {
-  id             Serial
-  telegram_id    Text!
-  symbol         Text!
-  action         Text!
-  shares         Text
-  price          Text
-  gross_amount   Text
-  brokerage      Text
-  sebon          Text
-  dp_fee         Text
-  cgt            Text
-  total_fees     Text
-  net_amount     Text
-  capital_before Text
-  capital_after  Text
-  wacc_before    Text
-  wacc_after     Text
-  note           Text
-  created_at     Text
-  test_mode      Text  @default("false")
-  close_type     Text  @default("MANUAL")
-
-  @@index([telegram_id])
-  @@index([symbol])
-  @@index([test_mode])
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GATE MISS TRACKING
