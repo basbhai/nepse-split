@@ -111,6 +111,10 @@ if not DASHBOARD_AUTH_SECRET:
         "entirely until it's configured in .env."
     )
 
+ENGINE_API_SECRET = os.getenv("ENGINE_API_SECRET", "")
+if not ENGINE_API_SECRET:
+    log.warning("ENGINE_API_SECRET is not set — /api/v1/* service routes will refuse all requests")
+
 SESSION_COOKIE = "nepse_session"
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
@@ -1971,3 +1975,126 @@ def set_engine_versions(payload: dict):
     except Exception as e:
         log.exception("set_engine_versions failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SERVICE-TO-SERVICE API  (/api/v1/*)
+# Called by nepse-trading only. Auth: X-Service-Key header.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _require_service_key(request: Request) -> None:
+    key = request.headers.get("X-Service-Key", "")
+    if not ENGINE_API_SECRET or not hmac.compare_digest(key, ENGINE_API_SECRET):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.get("/api/v1/symbols/validate")
+async def api_symbols_validate(q: str, request: Request):
+    """
+    Validate / resolve a symbol string against share_sectors.
+    Exact match first; falls back to ILIKE (up to 8 results).
+    Used by trading_core.lookup_symbols() — replaces direct DB read.
+    """
+    _require_service_key(request)
+    if not q or not q.strip():
+        raise HTTPException(status_code=400, detail="q is required")
+
+    rows = run_raw_sql(
+        'SELECT symbol FROM share_sectors WHERE UPPER(symbol) = UPPER(%s) LIMIT 1',
+        (q.strip(),)
+    )
+    if rows:
+        return {"matches": [rows[0]["symbol"]], "exact": True}
+
+    rows = run_raw_sql(
+        'SELECT symbol FROM share_sectors WHERE symbol ILIKE %s ORDER BY symbol LIMIT 8',
+        (f"%{q.strip()}%",)
+    )
+    return {"matches": [r["symbol"] for r in rows], "exact": False}
+
+
+@app.get("/api/v1/market-watch/{symbol}/ltp")
+async def api_market_watch_ltp(symbol: str, request: Request):
+    """
+    Latest ATrad tick for a symbol (most recent row today).
+    Used by execution_monitor — replaces direct atrad_market_watch SQL read.
+    Returns 404 if no tick exists for today.
+    """
+    _require_service_key(request)
+    from config import NST
+    from datetime import datetime
+    today = datetime.now(tz=NST).strftime("%Y-%m-%d")
+
+    rows = run_raw_sql(
+        """
+        SELECT ltp, vwap, bid_ask_ratio, dpr_proximity, low_dpr, high_dpr
+        FROM atrad_market_watch
+        WHERE symbol = %s AND date = %s
+        ORDER BY time DESC
+        LIMIT 1
+        """,
+        (symbol.upper(), today)
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No market watch data for {symbol} today")
+    return rows[0]
+
+
+@app.get("/api/v1/signals/today")
+async def api_signals_today(request: Request):
+    """
+    Today's BUY signals from market_log (outcome=PENDING).
+    Used by trading_core engine_client.fetch_signals() for /signal bot command.
+    """
+    _require_service_key(request)
+    from datetime import datetime
+    today = datetime.now(tz=NST).strftime("%Y-%m-%d")
+    rows = run_raw_sql(
+        """
+        SELECT id, symbol, sector, action, confidence, entry_price,
+               stop_loss, target, primary_signal, reasoning,
+               gemini_reason, market_state, composite_score,
+               date, time, timestamp
+        FROM market_log
+        WHERE date = %s AND outcome = 'PENDING' AND action = 'BUY'
+        ORDER BY confidence DESC
+        """,
+        (today,)
+    )
+    return {"signals": [dict(r) for r in rows], "date": today, "count": len(rows)}
+
+
+@app.get("/api/v1/market/state")
+async def api_market_state(request: Request):
+    """
+    Current market configuration read from the settings table.
+    Used by engine_client.fetch_market_state() in trading service.
+    """
+    _require_service_key(request)
+    keys = ["PAPER_MODE", "CIRCUIT_BREAKER", "MARKET_STATE",
+            "GEO_SCORE", "COMBINED_GEO", "LOSS_STREAK", "FD_RATE_PCT"]
+    rows = run_raw_sql(
+        "SELECT key, value FROM settings WHERE key = ANY(%s)",
+        (keys,)
+    )
+    state = {r["key"]: r["value"] for r in rows}
+    return {
+        "paper_mode":       state.get("PAPER_MODE", "true"),
+        "circuit_breaker":  state.get("CIRCUIT_BREAKER", "false"),
+        "market_state":     state.get("MARKET_STATE", "UNKNOWN"),
+        "geo_score":        state.get("GEO_SCORE", "0"),
+        "combined_geo":     state.get("COMBINED_GEO", "0"),
+        "loss_streak":      state.get("LOSS_STREAK", "0"),
+        "fd_rate_pct":      state.get("FD_RATE_PCT", "8.0"),
+    }
+
+
+# GET /api/v1/positions/live — REMOVED
+# Portfolio tracking moved entirely to nepse-trading.
+# Trading's execution_monitor reads from its own paper_portfolio table directly.
+
+
+# POST /api/v1/webhook/trade-executed — REMOVED
+# Engine does not track portfolio. All portfolio tracking is in nepse-trading.
+# Engine auditor reads system account trades via GET /api/v1/system-account/trades
+# on the trading service (T28).

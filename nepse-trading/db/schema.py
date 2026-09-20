@@ -12,6 +12,7 @@ TABS: dict[str, str] = {
     "user_broker_links": "user_broker_links",
     "user_signal_preferences": "user_signal_preferences",
     "settings": "settings",
+    "trade_journal": "trade_journal",
     "signal_deliveries": "signal_deliveries",
     "paper_users": "paper_users",
     "paper_capital": "paper_capital",
@@ -159,6 +160,76 @@ TABLE_DDL: dict[str, str] = {
         inserted_at TIMESTAMPTZ DEFAULT NOW(),
         CONSTRAINT ux_settings_key UNIQUE (key)
     );
+    """,
+
+    "trade_journal": """
+    CREATE TABLE IF NOT EXISTS "trade_journal" (
+        id SERIAL PRIMARY KEY,
+        created_at TEXT,
+        telegram_id TEXT,
+        symbol TEXT NOT NULL,
+        sector TEXT,
+        paper_mode TEXT,
+        entry_date TEXT,
+        entry_price TEXT,
+        shares TEXT,
+        allocation_npr TEXT,
+        primary_signal TEXT,
+        secondary_signal TEXT,
+        candle_pattern TEXT,
+        confidence_at_entry TEXT,
+        rsi_entry TEXT,
+        macd_hist_entry TEXT,
+        bb_signal_entry TEXT,
+        ema_trend_entry TEXT,
+        obv_trend_entry TEXT,
+        conf_score_entry TEXT,
+        volume_ratio_entry TEXT,
+        atr_pct_entry TEXT,
+        market_state_entry TEXT,
+        geo_score_entry TEXT,
+        nepal_score_entry TEXT,
+        combined_geo_entry TEXT,
+        nepse_index_entry TEXT,
+        stop_loss_planned TEXT,
+        target_planned TEXT,
+        hold_days_planned TEXT,
+        exit_date TEXT,
+        exit_price TEXT,
+        exit_reason TEXT,
+        market_state_exit TEXT,
+        geo_score_exit TEXT,
+        nepal_score_exit TEXT,
+        combined_geo_exit TEXT,
+        nepse_index_exit TEXT,
+        hold_days_actual TEXT,
+        return_pct TEXT,
+        pnl_npr TEXT,
+        result TEXT,
+        geo_delta TEXT,
+        nepal_delta TEXT,
+        combined_geo_delta TEXT,
+        nepse_return_pct TEXT,
+        alpha_vs_nepse TEXT,
+        loss_cause TEXT,
+        inserted_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS ix_trade_journal_telegram_id
+        ON "trade_journal" (telegram_id);
+    CREATE INDEX IF NOT EXISTS ix_trade_journal_symbol
+        ON "trade_journal" (symbol);
+    CREATE INDEX IF NOT EXISTS ix_trade_journal_result
+        ON "trade_journal" (result);
+    CREATE INDEX IF NOT EXISTS ix_trade_journal_primary_signal
+        ON "trade_journal" (primary_signal);
+    CREATE INDEX IF NOT EXISTS ix_trade_journal_entry_date
+        ON "trade_journal" (entry_date);
+    CREATE INDEX IF NOT EXISTS ix_trade_journal_sector
+        ON "trade_journal" (sector);
+    CREATE INDEX IF NOT EXISTS ix_trade_journal_loss_cause
+        ON "trade_journal" (loss_cause);
+    CREATE INDEX IF NOT EXISTS ix_trade_journal_paper_mode
+        ON "trade_journal" (paper_mode);
     """,
 
     "signal_deliveries": """
@@ -314,6 +385,7 @@ TABLE_COLUMNS: dict[str, list[str]] = {
     "user_broker_links": ["user_id", "broker_id", "link_type", "label", "url", "is_active", "notes", "created_at"],
     "user_signal_preferences": ["user_id", "notify_telegram", "notify_discord", "channel_priority", "auto_execute", "auto_execute_broker_id", "signal_filter", "min_score_threshold", "created_at", "updated_at"],
     "settings": ["key", "value", "description", "last_updated", "set_by"],
+    "trade_journal": ["created_at", "telegram_id", "symbol", "sector", "paper_mode", "entry_date", "entry_price", "shares", "allocation_npr", "primary_signal", "secondary_signal", "candle_pattern", "confidence_at_entry", "rsi_entry", "macd_hist_entry", "bb_signal_entry", "ema_trend_entry", "obv_trend_entry", "conf_score_entry", "volume_ratio_entry", "atr_pct_entry", "market_state_entry", "geo_score_entry", "nepal_score_entry", "combined_geo_entry", "nepse_index_entry", "stop_loss_planned", "target_planned", "hold_days_planned", "exit_date", "exit_price", "exit_reason", "market_state_exit", "geo_score_exit", "nepal_score_exit", "combined_geo_exit", "nepse_index_exit", "hold_days_actual", "return_pct", "pnl_npr", "result", "geo_delta", "nepal_delta", "combined_geo_delta", "nepse_return_pct", "alpha_vs_nepse", "loss_cause"],
     "signal_deliveries": ["user_id", "signal_date", "symbol", "channel", "status", "sent_at", "error_msg"],
     "paper_users": ["telegram_id", "discord_id", "username", "full_name", "status", "registered_at", "approved_at", "approved_by"],
     "paper_capital": ["user_id", "telegram_id", "starting_capital", "current_capital", "total_realised_pnl", "total_fees_paid", "total_cgt_paid", "total_trades", "total_wins", "total_losses", "last_updated", "test_mode"],

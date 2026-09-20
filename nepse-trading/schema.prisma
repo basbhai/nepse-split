@@ -162,6 +162,91 @@ model settings {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// TRADE JOURNAL — written by engine auditor.py via POST /api/v1/trade-journal
+// Immutable record of every closed trade with full entry + exit + market context.
+// Lives in trading because it is trade outcome data, not market analysis data.
+// Engine learning_hub reads back via GET /api/v1/trade-journal (future endpoint).
+// ─────────────────────────────────────────────────────────────────────────────
+
+model trade_journal {
+  id                     Serial
+  created_at             Text
+
+  // ── Identity
+  telegram_id            Text           // SYSTEM_BOT or user's telegram_id
+  symbol                 Text!
+  sector                 Text
+  paper_mode             Text           // true | false
+
+  // ── Entry context
+  entry_date             Text
+  entry_price            Text
+  shares                 Text
+  allocation_npr         Text
+  primary_signal         Text
+  secondary_signal       Text
+  candle_pattern         Text
+  confidence_at_entry    Text
+
+  // Technical state at entry
+  rsi_entry              Text
+  macd_hist_entry        Text
+  bb_signal_entry        Text
+  ema_trend_entry        Text
+  obv_trend_entry        Text
+  conf_score_entry       Text
+  volume_ratio_entry     Text
+  atr_pct_entry          Text
+
+  // Market context at entry
+  market_state_entry     Text
+  geo_score_entry        Text
+  nepal_score_entry      Text
+  combined_geo_entry     Text
+  nepse_index_entry      Text
+
+  // Planned levels
+  stop_loss_planned      Text
+  target_planned         Text
+  hold_days_planned      Text
+
+  // ── Exit context
+  exit_date              Text
+  exit_price             Text
+  exit_reason            Text
+
+  // Market context at exit
+  market_state_exit      Text
+  geo_score_exit         Text
+  nepal_score_exit       Text
+  combined_geo_exit      Text
+  nepse_index_exit       Text
+
+  // ── Outcomes
+  hold_days_actual       Text
+  return_pct             Text
+  pnl_npr                Text
+  result                 Text           // WIN | LOSS | BREAKEVEN
+
+  geo_delta              Text
+  nepal_delta            Text
+  combined_geo_delta     Text
+  nepse_return_pct       Text
+  alpha_vs_nepse         Text
+
+  loss_cause             Text
+
+  @@index([telegram_id])
+  @@index([symbol])
+  @@index([result])
+  @@index([primary_signal])
+  @@index([entry_date])
+  @@index([sector])
+  @@index([loss_cause])
+  @@index([paper_mode])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GROUP 6 — OPERATIONAL LOGS
 // ─────────────────────────────────────────────────────────────────────────────
 

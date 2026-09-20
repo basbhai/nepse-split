@@ -166,6 +166,12 @@ POST /api/v1/positions/execute
      Returns: { executed: bool, trade_id: int }
      Auth: X-Service-Key header
 
+POST /api/v1/trade-journal
+     Body: full trade_journal row (from auditor.py after trade closes)
+     Called by: engine auditor.py — trading owns trade_journal table
+     Returns: { created: bool, id: int }
+     Auth: X-Service-Key header
+
 GET  /health
      Returns: { status: "ok", db: "ok"|"error" }
      No auth — used by systemd health checks
@@ -390,14 +396,39 @@ Edit on Windows (D:\project\nepse-trading)
 
 ---
 
-## 8. What Does NOT Change After Split
+## 8. Service boundary (definitive)
+
+### nepse-decisionEngine — analysis machine
+- Scrapes market data, runs filter/Gemini/Claude pipeline
+- Writes signals to `market_log`
+- Runs learning hub, monthly council, auditor
+- Pushes signal to trading via `POST /api/v1/webhook/signal`
+- Auditor reads trade outcomes from trading via `GET /api/v1/system-account/trades`
+- Auditor writes `trade_journal` to trading via `POST /api/v1/trade-journal`
+- **Zero notifications** — no Telegram/Discord tokens in production
+- **Zero portfolio** — `portfolio` table removed
+
+### nepse-trading — user + notification layer
+- Receives signals from engine, fans out to all users (Telegram + Discord)
+- Owns ALL portfolio: paper, live Meroshare sync, SYSTEM_BOT auto-execute
+- Owns `trade_journal` (written by engine auditor via REST)
+- `meroshare.py` lives here — syncs live holdings using user credentials
+- `briefing.py` lives here — assembles morning brief, calls engine for signals, sends to users
+- ALL notifications go through this service (signals, briefings, heartbeats, summaries, errors)
+
+### Files that move from engine → trading (code cleanup phase)
+| File | From | To |
+|---|---|---|
+| `modules/meroshare.py` | engine | trading |
+| `workflows/briefing.py` | engine | trading |
+| Notification logic for non-signal alerts | engine notifier.py | trading notifier |
+
+## 9. What Does NOT Change
 
 - schema.prisma as source of truth for each service's own tables
-- Import convention: `from sheets import` for all DB access in both repos
-- `_db()` context manager for atomic multi-table transactions only
-- `market_log` append-only rule (engine owns it, trading service never touches it)
-- Learning hub training source: system account paper_trade_log rows — engine auditor
-  now reads these via `GET /api/v1/system-account/trades` (separate DB, REST required)
+- `from sheets import` for all DB access in both repos
+- `_db()` context manager for atomic multi-table transactions
+- `market_log` append-only (engine owns it, trading never touches it)
 
 ## 9. Database Setup (local)
 

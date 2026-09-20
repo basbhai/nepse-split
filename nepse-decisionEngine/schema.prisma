@@ -90,40 +90,8 @@ model market_breadth {
   @@index([timestamp])
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PORTFOLIO
-// ─────────────────────────────────────────────────────────────────────────────
-
-model portfolio {
-  id            Serial
-  symbol        Text!
-  entry_date    Text
-  entry_price   Text
-  shares        Text
-  total_cost    Text
-  current_price Text
-  current_value Text
-  pnl_npr       Text
-  pnl_pct       Text
-  peak_price    Text
-  stop_type     Text
-  stop_level    Text
-  trail_active  Text
-  trail_stop    Text
-  status        Text  @default("OPEN")
-  exit_date     Text
-  exit_price    Text
-  exit_reason   Text
-  demat_confirmed_date Text
-  // Date meroshare.py's sync last found this symbol present in Meroshare's
-  // myPortfolio (real CDSC demat balance). NULL until confirmed. Lets
-  // execution_monitor's settlement gate release a position for selling as
-  // soon as it's ACTUALLY settled, instead of always waiting a fixed T+3
-  // trading days regardless of real settlement status.
-
-  @@index([symbol])
-  @@index([status])
-}
+// portfolio — REMOVED: all portfolio tracking moved to nepse-trading.
+// Engine is analysis-only. Positions are owned by the trading service.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SIGNALS & TRADING LOG
@@ -155,8 +123,6 @@ model market_log {
   bb_pct_b         Text   // Bollinger %B at signal time
   bb_upper         Text   // Bollinger upper band
   bb_lower         Text   // Bollinger lower band
-  bollinger_upper  Text
-  bollinger_lower  Text
   ema_20_50_cross  Text   // EMA 20/50 crossover signal
   ema_50_200_cross Text   // EMA 50/200 crossover signal
   volume           Text
@@ -346,10 +312,6 @@ model candle_patterns {
   tier               Text   // 1 | 2 | 3
   nepal_win_rate_pct Text
   sample_size        Text
-  avg_gain_pct       Text
-  best_sector        Text
-  best_rsi_range     Text
-  volume_condition   Text
   reliability        Text
   notes              Text
 }
@@ -549,6 +511,23 @@ model fundamentals {
   pe_ratio             Float?
   peg_value            Float?
   scraped_at           DateTime @default(now())
+  // ── Extended columns present in production ───────────────────────────────
+  company              String?
+  sector               String?
+  report_date          String?
+  data_source          String?
+  bvps                 Float?   // book value per share
+  net_profit_npr       Float?
+  net_profit_growth_pct Float?
+  revenue_npr          Float?
+  revenue_growth_pct   Float?
+  market_cap_npr       Float?
+  nim_pct              Float?   // net interest margin
+  npl_pct              Float?
+  car_pct              Float?   // capital adequacy ratio
+  pbv_ratio            Float?   // price-to-book
+  dividend_yield       Float?
+  debt_to_equity       Float?
 
   @@unique([symbol, fiscal_year, quarter])
   @@index([symbol])
@@ -564,236 +543,20 @@ model fundamental_beta {
   n_months       Int?
   period_start   DateTime?
   period_end     DateTime?
-  computed_date  DateTime @default(now()) @db.Date
-
-  @@unique([symbol, computed_date])
-  @@index([symbol])
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SECTOR & CORPORATE EVENTS
-// ─────────────────────────────────────────────────────────────────────────────
-
-model sector_momentum {
-  id                    Serial
-  date                  Text
-  sector                Text
-  weekly_return_pct     Text
-  monthly_return_pct    Text
-  avg_volume_change_pct Text
-  momentum_score        Text
-  status                Text
-  top_stock_1           Text
-  top_stock_2           Text
-  catalyst              Text
-  last_updated          Text
-
-  @@index([date])
-  @@index([sector])
-}
-
-model corporate_events {
-  id                  Serial
-  symbol              Text
-  company             Text
-  event_type          Text
-  announcement_date   Text
-  event_date          Text
-  book_close_date     Text
-  details             Text
-  expected_impact_pct Text
-  days_until_event    Text
-  status              Text
-  source              Text
 
   @@index([symbol])
-  @@index([event_date])
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DIVIDEND TRACKING
-// ─────────────────────────────────────────────────────────────────────────────
-
-model dividend_announcements {
-  id                  Serial
-  symbol              Text!
-  company             Text
-  sector              Text
-  announcement_date   Text!          // YYYY-MM-DD — the event day (day 0)
-  fiscal_year         Text           // e.g. "2080/81"
-  dividend_type       Text           // CASH | BONUS | BOTH
-  cash_dividend_pct   Text           // cash % of face value
-  bonus_share_pct     Text           // bonus share %
-  total_dividend_pct  Text           // total effective %
-  book_close_date     Text           // last day to be eligible
-  direction           Text           // INCREASE | DECREASE | UNCHANGED | FIRST_TIME
-  prev_dividend_pct   Text           // previous year for comparison
-  source              Text  @default("sharesansar")
-  scraped_at          Text
-
-  @@unique([symbol, announcement_date])
-  @@index([symbol])
-  @@index([announcement_date])
-  @@index([direction])
-  @@index([sector])
-}
-
-model dividend_pattern_study {
-  id                    Serial
-  symbol                Text!
-  announcement_date     Text!
-  sector                Text
-  direction             Text          // INCREASE | DECREASE | UNCHANGED
-
-  // Price drift before announcement
-  price_drift_d10       Text          // % price change from day -10 to day 0
-  price_drift_d6        Text          // % price change from day -6 to day 0
-  price_drift_d4        Text          // % price change from day -4 to day 0
-  price_drift_d2        Text          // % price change from day -2 to day 0
-
-  // Volume momentum before announcement
-  vol_ratio_d6          Text          // volume at day -6 / avg_volume_20d
-  vol_ratio_d4          Text          // volume at day -4 / avg_volume_20d
-  vol_ratio_d2          Text          // volume at day -2 / avg_volume_20d
-  vol_ratio_d1          Text          // volume at day -1 / avg_volume_20d
-
-  // Technical state before announcement
-  rsi_d6                Text          // RSI at day -6
-  rsi_d4                Text          // RSI at day -4
-  obv_trend_d6_to_d1    Text          // RISING | FALLING | FLAT over -6 to -1
-  atr_ratio_d6          Text          // ATR at -6 / avg_ATR_20d (compression = <1.0)
-  macd_state_d4         Text          // ABOVE | BELOW signal line at day -4
-
-  // Post-announcement outcome (for validating study)
-  return_d0             Text          // % return on announcement day
-  return_d1             Text          // % return on day +1
-  return_d2_d9          Text          // cumulative % return day +2 to +9
-  vs_nepse_d1           Text          // alpha vs NEPSE on day +1
-
-  // Pattern classification
-  pattern_detected      Text          // true | false — did pre-pattern fire?
-  pattern_type          Text          // ACCUMULATION | DISTRIBUTION | NONE
-  pattern_strength      Text          // STRONG | WEAK | NONE
-  entry_feasible        Text          // true | false — was T+3 entry possible?
-  optimal_entry_day     Text          // -6 | -5 | -4 | -3 — best day to enter
-
-  in_dividend_season    Text
-  event_type            Text
-  fiscal_year           Text
-  dividend_type         Text
-  run_date              Text          // when this analysis was run
-
-  @@unique([symbol, announcement_date])
-  @@index([symbol])
-  @@index([direction])
-  @@index([pattern_detected])
-  @@index([sector])
-}
+// sector_momentum, corporate_events — DROPPED: no live writer or reader (audit 2026-09-20)
+// dividend_announcements, dividend_pattern_study — DROPPED: writer/reader both archived
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LEARNING & SELF-IMPROVEMENT
 // ─────────────────────────────────────────────────────────────────────────────
 
-// trade_journal: immutable raw record of every trade with full entry + exit context
-// One row per trade. Written by auditor.py at trade close. Never updated.
-model trade_journal {
-  id          Serial
-  created_at  Text           // YYYY-MM-DD HH:MM:SS NST
-
-  // ── Identity
-  symbol      Text!
-  sector      Text
-  paper_mode  Text           // true | false
-
-  // ── Entry context (snapshot at moment of BUY signal)
-  entry_date             Text
-  entry_price            Text
-  shares                 Text
-  allocation_npr         Text
-
-  primary_signal         Text  // MACD | BB_LOWER | SMA_CROSS | CANDLE | COMBO
-  secondary_signal       Text
-  candle_pattern         Text
-  confidence_at_entry    Text  // claude_analyst confidence 0-100
-
-  // Technical state at entry
-  rsi_entry              Text
-  macd_hist_entry        Text
-  bb_signal_entry        Text
-  ema_trend_entry        Text
-  obv_trend_entry        Text
-  conf_score_entry       Text
-  volume_ratio_entry     Text
-  atr_pct_entry          Text
-
-  // Market context at entry
-  market_state_entry     Text
-  geo_score_entry        Text
-  nepal_score_entry      Text
-  combined_geo_entry     Text
-  nepse_index_entry      Text
-
-  // Planned exit levels
-  stop_loss_planned      Text
-  target_planned         Text
-  hold_days_planned      Text
-
-  // ── Exit context
-  exit_date              Text
-  exit_price             Text
-  exit_reason            Text  // STOP_LOSS | TARGET_HIT | TRAILING_STOP | MANUAL | CIRCUIT_BREAKER | GEO_BLOCK
-
-  // Market context at exit
-  market_state_exit      Text
-  geo_score_exit         Text
-  nepal_score_exit       Text
-  combined_geo_exit      Text
-  nepse_index_exit       Text
-
-  // ── Computed outcomes (filled by auditor.py)
-  hold_days_actual       Text
-  return_pct             Text
-  pnl_npr                Text
-  result                 Text  // WIN | LOSS | BREAKEVEN
-
-  // Deltas — the critical causal layer
-  geo_delta              Text
-  nepal_delta            Text
-  combined_geo_delta     Text
-  nepse_return_pct       Text
-  alpha_vs_nepse         Text
-
-  // Loss attribution — computed by auditor.py _attribute_loss()
-  loss_cause             Text  // MACRO_DETERIORATION | SIGNAL_FAILURE | MARKET_WIDE_SELLOFF | ENTRY_TIMING | STOP_TOO_TIGHT | SECTOR_EVENT | NULL
-
-  // Learning link
-  lesson_ids             Text
-
-  // ── Momentum / Reversal context at entry — added May 16, 2026
-  // Copied from market_log BUY row by auditor.py at trade close.
-  // Mirrors the 6 momentum columns in market_log so council/hub can correlate
-  // entry momentum status with final trade outcome.
-  momentum_status_entry  Text   // FALLING_KNIFE | OVERSOLD_WATCH | EARLY_REVERSAL | CONFIRMED_REVERSAL | NEUTRAL — at BUY signal time
-  rsi_slope_3d_entry     Text   // RSI slope over 3 days at entry
-  macd_hist_slope_entry  Text   // MACD histogram slope at entry
-  bb_pct_b_slope_entry   Text   // BB %B slope at entry
-  bounce_failed_entry    Text   // "true" | "false" — dead-cat bounce at entry
-  reversal_days_entry    Text   // consecutive RSI improvement days at entry
-
-  // ── Live intraday signals at entry — added May 16, 2026
-  // Also copied from market_log BUY row (written from ATrad intraday scraper).
-  vwap_dev_entry         Text   // (ltp - vwap) / vwap deviation from fair value at entry
-  bid_ask_ratio_entry    Text   // bid_qty / (bid_qty + ask_qty) demand pressure 0-1 at entry
-  dpr_proximity_entry    Text   // (ltp - low_dpr) / (high_dpr - low_dpr) circuit range position at entry
-
-  @@index([symbol])
-  @@index([result])
-  @@index([primary_signal])
-  @@index([entry_date])
-  @@index([sector])
-  @@index([loss_cause])
-  @@index([paper_mode])
-}
+// trade_journal — MOVED TO nepse-trading/schema.prisma
+// Written by engine auditor.py via POST /api/v1/trade-journal on trading service.
+// Owned by trading because it is trade outcome data, not market analysis data.
 
 // learning_hub: synthesised lessons written by GPT weekly + research paper seeds
 model learning_hub {
@@ -836,6 +599,15 @@ model learning_hub {
   validation_count     Text
   trade_journal_ids    Text
   source_weight        Float  @default(1.0)
+  // ── Extended columns present in production ───────────────────────────────
+  lesson               Text   // short human-readable summary of the lesson
+  pattern              Text   // pattern name or identifier
+  outcome              Text   // observed outcome this lesson was derived from
+  confidence           Text   // confidence level (may differ from confidence_level)
+  applied_count        Text   // how many times this lesson has been applied
+  win_when_applied     Text   // win rate when this lesson was the primary driver
+  pnl_npr              Text   // total PnL attributed to this lesson
+  timestamp            Text   // when this row was last written
 
   @@index([symbol])
   @@index([sector])
@@ -852,31 +624,24 @@ model learning_hub {
 // ─────────────────────────────────────────────────────────────────────────────
 
 model backtest_results {
-  id                  Serial
-  test_name           Text
-  parameter_tested    Text
-  optimal_value       Text
-  win_rate_at_optimal Text
-  sample_size         Text
-  confidence          Text
-  date_run            Text
-  notes               Text
-
-  sim_mode            Text   // constrained | free
-  period_start        Text
-  period_end          Text
-  total_trades        Text
-  wins                Text
-  losses              Text
-  win_rate_pct        Text
-  profit_factor       Text
-  annual_ret_pct      Text
-  total_pnl_npr       Text
-  total_fees_npr      Text
-  sharpe_ratio        Text
-  max_drawdown_pct    Text
-  alpha_vs_nepse      Text
-  signal_breakdown    Text
+  id               Serial
+  test_name        Text
+  sample_size      Text
+  confidence       Text
+  date_run         Text
+  notes            Text
+  sim_mode         Text   // constrained | free
+  period_start     Text
+  period_end       Text
+  total_trades     Text
+  wins             Text
+  losses           Text
+  win_rate_pct     Text
+  profit_factor    Text
+  annual_ret_pct   Text
+  total_pnl_npr    Text
+  alpha_vs_nepse   Text
+  signal_breakdown Text
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -948,13 +713,12 @@ model settings {
 
 // db_schema is managed internally by db/migrations.py — do not touch
 model db_schema {
-  id             Serial
-  migration_id   Text!  @unique
-  name           Text!
-  applied_at     Text
-  rolled_back_at Text
-  status         Text  @default("applied")
-  notes          Text
+  id           Serial
+  migration_id Text!  @unique
+  name         Text!
+  applied_at   Text
+  status       Text  @default("applied")
+  notes        Text
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -984,33 +748,7 @@ model nepse_indices {
   @@index([index_name])
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// STATISTICAL ANALYSIS RESULTS
-// ─────────────────────────────────────────────────────────────────────────────
-
-model macro_stat_results {
-  id              Serial
-  variable        Text!
-  variable_label  Text
-  lag_months      Text!
-  spearman_rho    Text
-  p_value         Text
-  p_corrected     Text
-  significant     Text
-  effect_size     Text
-  n_pairs         Text
-  rho_3m_forward  Text
-  p_3m_forward    Text
-  n_pairs_3m      Text
-  n_total_tests   Text
-  alpha_corrected Text
-  run_date        Text
-  notes           Text
-
-  @@unique([variable, lag_months, run_date])
-  @@index([variable])
-  @@index([run_date])
-}
+// macro_stat_results — DROPPED: writer/reader both archived (audit 2026-09-20)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DAILY CONTEXT LOG (Gemini nightly summary — one row per trading day)
@@ -1122,19 +860,7 @@ model fd_rate_summary {
   @@index([fetch_date])
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// INTERNATIONAL PRICES (for research / geo_correlation)
-// ─────────────────────────────────────────────────────────────────────────────
-
-model international_prices {
-  id            serial
-  date          DateTime @db.Date
-  variable_name String   @db.VarChar(20)
-  close_price   Float?   @db.Decimal
-  source        String?  @default("yfinance") @db.VarChar(50)
-
-  @@index([date, variable_name])
-}
+// international_prices — DROPPED: no live writer or reader (audit 2026-09-20)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SHARE SECTORS (symbol → sector mapping)
@@ -1432,8 +1158,6 @@ model system_proposals {
   confidence        Text
   status            Text  @default("PENDING")
   approved_at       Text
-  rejected_at       Text
-  rejection_reason  Text
   inserted_at       Text
 
   @@index([run_month])
@@ -1486,7 +1210,6 @@ model pattern_validation_log {
   magnitude_error             String?
   outcome                     String   @default("PENDING")
   co_occurrence_count         String   @default("1")
-  escalated_from              String?
   scored_by                   String   @default("pending")
   scored_at                   String?
   inserted_at                 DateTime @default(now())
@@ -1593,24 +1316,6 @@ model broker_flow {
   net_flow_1d  Text   // acc_amount_1d - dist_amount_1d (NPR)
   flow_bias_1d Text   // ACCUMULATION | DISTRIBUTION | NEUTRAL
 
-  // ── 1W accumulation ───────────────────────────────────────────────────────
-  acc_broker_count_1w   Text
-  acc_amount_1w         Text
-  acc_qty_1w            Text
-  acc_top_broker_1w     Text
-  acc_top_broker_pct_1w Text
-
-  // ── 1W distribution (placeholder — not fetched to save API calls) ─────────
-  dist_broker_count_1w   Text
-  dist_amount_1w         Text
-  dist_qty_1w            Text
-  dist_top_broker_1w     Text
-  dist_top_broker_pct_1w Text
-
-  // ── Net flow 1W ───────────────────────────────────────────────────────────
-  net_flow_1w  Text
-  flow_bias_1w Text
-
   // ── Raw broker lists (JSON strings) ──────────────────────────────────────
   acc_brokers_1d_json  Text   // [{broker, amount, qty, acc_pct, avg_rate}, ...]
   dist_brokers_1d_json Text
@@ -1638,7 +1343,6 @@ model broker_holdings {
   name   Text
 
   // ── Holdings metrics ──────────────────────────────────────────────────────
-  total_involved_brokers   Text   // total brokers that traded this symbol
   top3_holding_pct         Text   // % of total qty held by top 3 brokers
   total_qty                Text   // total quantity traded
   hold_qty                 Text   // quantity still held (not sold)
@@ -1651,20 +1355,14 @@ model broker_holdings {
   change         Text
   change_pct     Text
 
-  // ── Top 3 brokers ─────────────────────────────────────────────────────────
+  // ── Top 3 brokers (name + pct only — code/hold not read by any consumer) ──
   top_broker_1_name    Text
-  top_broker_1_code    Text
-  top_broker_1_hold    Text   // holdQuantity
-  top_broker_1_pct     Text   // holdingPercentage
+  top_broker_1_pct     Text
 
   top_broker_2_name    Text
-  top_broker_2_code    Text
-  top_broker_2_hold    Text
   top_broker_2_pct     Text
 
   top_broker_3_name    Text
-  top_broker_3_code    Text
-  top_broker_3_hold    Text
   top_broker_3_pct     Text
 
   // ── Full top brokers JSON (for email detail) ──────────────────────────────
@@ -1698,7 +1396,11 @@ model filter_candidates_log {
   pass_count      Int    @default(1)
   last_seen       DateTime @db.Timestamptz
   created_at      DateTime @default(now()) @db.Timestamptz
-  engine_source   Text   @default("v1")   // "v1" | "v2" | "BOTH" — added 2026-07, dual-engine arbitration
+  engine_source          Text   @default("v1")
+  ema20_dip_fired        Text   // "true"|"false" — EMA20 dip-and-recover pattern
+  price_vs_ema20_pct     Text   // % price deviation from EMA20
+  price_vs_ema200_pct    Text   // % price deviation from EMA200
+  uptrend_pullback_fired Text   // "true"|"false" — uptrend pullback pattern
 
   @@unique([symbol, date])
   @@index([date])
@@ -1741,4 +1443,16 @@ model stealth_signals {
   @@index([symbol])
   @@index([signal_date])
   @@index([broker_id])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAVED QUERIES — dashboard query bookmarks
+// ─────────────────────────────────────────────────────────────────────────────
+
+model saved_queries {
+  id          Serial
+  name        Text!  @unique
+  description Text
+  sql         Text!
+  created_at  Text
 }

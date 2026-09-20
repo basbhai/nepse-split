@@ -1,0 +1,21 @@
+$kind: collection
+description: |-
+  Complete API collection for the NEPSE AI Platform.  
+  Covers three FastAPI services:
+
+  - Dashboard API (port 8766) — read-only dashboard, reporter, settings, NRB data, stealth signals
+      
+  - NRB Entry API (port 8765) — standalone NRB monthly data entry
+      
+  - Trading API (port 8767) — paper-trading service (service-to-service, X-Service-Key auth)
+variables:
+  dashboard_base_url: http://localhost:8766
+  nrb_base_url: http://localhost:8765
+  trading_base_url: http://localhost:8767
+  dashboard_auth_secret: ""
+  engine_api_secret: ""
+  telegram_id: "123456789"
+auth:
+  - id: 7816fc44-2e56-4ac2-a9d1-4c48d8cbdded
+    type: basic
+    name: Basic Auth

@@ -63,6 +63,43 @@ def fetch_approved_users() -> list:
         raise TradingServiceError(f"fetch_approved_users: {e}") from e
 
 
+def push_signal(
+    symbol: str,
+    signal_date: str,
+    action: str,
+    composite_score: float = 0,
+    confidence: float = 0,
+    entry_price: float = 0,
+    primary_signal: str = "",
+    suggested_hold: int = 10,
+) -> dict:
+    """
+    Push a BUY/WAIT/AVOID signal to the trading service.
+    Trading service fans out to all approved users and auto-executes for SYSTEM_BOT.
+    Replaces notifier.py's direct Telegram send for signals.
+    On TradingServiceError: log and continue — never crash the engine pipeline.
+    """
+    try:
+        r = httpx.post(
+            f"{TRADING_SERVICE_URL}/api/v1/webhook/signal",
+            headers=_headers(), timeout=10,
+            json={
+                "symbol":          symbol,
+                "signal_date":     signal_date,
+                "action":          action,
+                "composite_score": composite_score,
+                "confidence":      confidence,
+                "entry_price":     entry_price,
+                "primary_signal":  primary_signal,
+                "suggested_hold":  suggested_hold,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        raise TradingServiceError(f"push_signal({symbol} {action}): {e}") from e
+
+
 def notify_signal_executed(
     symbol: str, shares: int, price: float, telegram_id: str, timestamp: str
 ) -> None:

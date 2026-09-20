@@ -522,27 +522,34 @@ def _format_eod_summary(
 
 def send_buy_signal(result) -> bool:
     """
-    Send a BUY signal to ALL approved paper_users via Telegram (parallel).
-    Also sends email as backup if configured.
-    result: AnalystResult from claude_analyst.py
+    Push BUY signal to trading service — it handles all user notifications
+    (Telegram, Discord) and SYSTEM_BOT auto-execution.
+    Engine no longer sends directly to Telegram for signals.
     """
     if result.action != "BUY":
         return False
 
-    message = _format_buy_signal(result)
-    tg_ok   = send_telegram(message, parse_mode="Markdown")
+    from datetime import datetime
+    from clients.trading_client import push_signal, TradingServiceError
 
-    # Email as backup for BUY signals
-    if EMAIL_USER:
-        email_body = message.replace("*", "").replace("▬", "-")
-        send_email(
-            subject=f"NEPSE {'[PAPER] ' if _is_paper_mode() else ''}BUY: {result.symbol} @ NPR {result.entry_price:.0f}",
-            body=email_body,
+    signal_date = datetime.now(tz=NST).strftime("%Y-%m-%d")
+    try:
+        resp = push_signal(
+            symbol         = result.symbol,
+            signal_date    = signal_date,
+            action         = "BUY",
+            composite_score= getattr(result, "composite_score", 0) or 0,
+            confidence     = getattr(result, "confidence", 0) or 0,
+            entry_price    = float(getattr(result, "entry_price", 0) or 0),
+            primary_signal = getattr(result, "primary_signal", "") or "",
+            suggested_hold = getattr(result, "suggested_hold", 10) or 10,
         )
-
-    if tg_ok:
-        logger.info("BUY signal sent: %s @ NPR %.0f", result.symbol, result.entry_price)
-    return tg_ok
+        logger.info("BUY signal pushed to trading: %s → delivered=%s skipped=%s",
+                    result.symbol, resp.get("delivered", "?"), resp.get("skipped", "?"))
+        return True
+    except TradingServiceError as e:
+        logger.error("push_signal failed for %s: %s — trading service may be down", result.symbol, e)
+        return False
 
 
 def send_wait_signal(result) -> bool:

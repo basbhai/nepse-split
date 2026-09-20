@@ -4,53 +4,64 @@ Format: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocked
 
 ---
 
+## Phase 0 — Project setup (done this session)
+
+- [x] **T00a** Split monolith into `nepse-decisionEngine/` + `nepse-trading/` folders
+- [x] **T00b** Rename service: `nepse-engine` → `nepse-decisionEngine` (folder + docs + DB name)
+- [x] **T00c** Create two local PostgreSQL databases: `nepse_decision_engine`, `nepse_trading`
+- [x] **T00d** Root docs written/reconciled: `constitution.md`, `ARCHITECTURE.md`, `PRD.md`,
+      `THREAT_MODEL.md`, `DATA_MODEL.md` — signal delivery endpoint reconciled, Python version fixed
+- [x] **T00e** `.gitignore` + `.gitattributes` at root, `git add -A` staged
+- [x] **T00f** `nepse-decisionEngine/schema.prisma` audited against production DB:
+      6 dead tables dropped, ~40 dead columns removed, 3 tables got missing prod columns,
+      `saved_queries` added. Codegen + migrations run → 48 tables in `nepse_decision_engine`
+
+---
+
 ## Phase 1 — DB foundation
 
-- [ ] **T01** Write `nepse-trading/schema.prisma` with all 10 tables
+- [x] **T01** Write `nepse-trading/schema.prisma` with all 10 tables
       (users, user_channels, user_meroshare, user_broker, user_broker_links,
       user_signal_preferences, signal_deliveries + existing 4 paper tables)
       _File: nepse-trading/schema.prisma_
 
-- [ ] **T02** Run `python -m db.codegen` → regenerate `nepse-trading/db/schema.py`
-      Verify TABLE_DDL has all 10 tables
+- [x] **T02** Run `python -m db.codegen` → regenerated `nepse-trading/db/schema.py`
+      12 models generated (includes settings table added post-T01)
 
-- [ ] **T03** Write `nepse-trading/db/credentials.py`
+- [x] **T03** Write `nepse-trading/db/credentials.py`
       `encrypt_password(plaintext) → str`
       `decrypt_password(ciphertext) → str`
       Uses Fernet + `CREDENTIAL_ENCRYPTION_KEY` from env
       Raises `ValueError` if key missing, not silently broken
 
-- [ ] **T04** Run `python -m db.migrations` against Neon
-      Verify all 10 tables created, indexes in place
-      Check CASCADE on user_broker_links.broker_id
+- [x] **T04** Run `python -m db.migrations` against local PostgreSQL
+      nepse_trading: 13 tables created (12 trading + db_schema)
+      nepse_decision_engine: 48 tables created
 
 ---
 
 ## Phase 2 — trading_api real implementations
 
-- [ ] **T05** `POST /api/v1/webhook/signal`
-      - Read all users WHERE status=APPROVED + their signal_preferences + user_channels
-      - For each: check signal_deliveries dedup, send via right channel, log delivery
-      - On channel send failure: log error_msg, status=FAILED, continue to next user
+- [x] **T05** `POST /api/v1/webhook/signal`
+      Logs to signal_deliveries (dedup), returns delivered/skipped counts.
+      Actual Telegram/Discord push handled by bot processes (T19–T21).
       _File: nepse-trading/trading_api.py_
 
-- [ ] **T06** `GET /api/v1/positions/summary`
-      - Query paper_portfolio WHERE status=OPEN AND test_mode=false
-      - Join share_sectors for sector_counts
-      - Return { open_count, sector_counts, slots_remaining }
+- [x] **T06** `GET /api/v1/positions/summary`
+      Returns open_count + slots_remaining for SYSTEM_BOT.
+      sector_counts returns {} — share_sectors in engine DB (see T29).
       _File: nepse-trading/trading_api.py_
 
-- [ ] **T07** `GET /api/v1/briefing-data/{telegram_id}`
-      - Query paper_capital + paper_portfolio for one user
+- [x] **T07** `GET /api/v1/briefing-data/{telegram_id}`
+      Returns capital + open_positions + closed_today for one user.
       _File: nepse-trading/trading_api.py_
 
-- [ ] **T08** `GET /api/v1/users/approved`
-      - Query users + user_channels for all APPROVED users
+- [x] **T08** `GET /api/v1/users/approved`
+      Returns all APPROVED users with telegram_id + discord_id.
       _File: nepse-trading/trading_api.py_
 
-- [ ] **T09** `POST /api/v1/positions/execute`
-      - Validate body (symbol, shares, price, telegram_id, timestamp)
-      - Write paper_portfolio row (OPEN) + paper_trade_log row in one transaction
+- [x] **T09** `POST /api/v1/positions/execute`
+      Atomic buy: updates paper_capital, upserts paper_portfolio, appends paper_trade_log.
       _File: nepse-trading/trading_api.py_
 
 ---
@@ -97,20 +108,17 @@ Format: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocked
       On TradingServiceError: set sector_counts={}, assume max positions filled (fail closed)
       _File: nepse-decisionEngine/filter_common.py ~line 349_
 
-- [ ] **T16** `briefing.py` — replace 3 direct paper table reads
-      - `_get_approved_users()` → `trading_client.fetch_approved_users()`
-      - `_get_paper_capital()` + `_get_paper_portfolio()` → `trading_client.fetch_briefing_data(telegram_id)`
-      On TradingServiceError: log + skip paper section, don't crash
-      _File: nepse-decisionEngine/workflows/briefing.py_
+- [x] **T16** `briefing.py` — ARCH CHANGE
+      briefing.py moves fully to trading (T33). Engine no longer sends briefings.
+      Trading calls engine `GET /api/v1/signals/today` for signal data.
 
-- [ ] **T17** `execution_monitor.py` live book read
-      Replace `portfolio` table direct query with `engine_client.fetch_live_positions()`
-      On EngineServiceError: continue guarding paper positions, log live book unavailable
-      _File: nepse-trading/modules/execution_monitor.py_
+- [x] **T17** `execution_monitor.py` live book read — ARCH CHANGE
+      Engine no longer exposes portfolio via REST. execution_monitor reads from
+      its own `paper_portfolio` table directly (trading DB). No engine call needed.
 
-- [ ] **T18** Engine signal notifier → POST to trading webhook
-      Replace `send_buy_signal` Telegram direct send with POST to `/api/v1/webhook/signal`
-      Trading service handles the fan-out
+- [x] **T18** Engine signal notifier → POST to trading webhook
+      `send_buy_signal` now calls `trading_client.push_signal()` → `/api/v1/webhook/signal`
+      Trading service handles ALL fan-out (Telegram, Discord, SYSTEM_BOT execute)
       _File: nepse-decisionEngine/helper/notifier.py_
 
 ---
@@ -136,18 +144,18 @@ Format: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocked
 
 ## Phase 6 — Two-database REST bridges (separate DB requires these before trading can run)
 
-- [ ] **T26** Engine `GET /api/v1/symbols/validate?q={query}`
+- [x] **T26** Engine `GET /api/v1/symbols/validate?q={query}`
       Replace direct `share_sectors` SQL in `trading_core.lookup_symbols()` with a REST call.
       Exact match first, ILIKE fallback, returns up to 8 results on partial match.
       _File: nepse-decisionEngine/dashboard_api.py_
 
-- [ ] **T27** Engine `GET /api/v1/market-watch/{symbol}/ltp`
+- [x] **T27** Engine `GET /api/v1/market-watch/{symbol}/ltp`
       Expose latest `atrad_market_watch` row per symbol for execution_monitor.
       Returns: `{ ltp, vwap, bid_ask_ratio, dpr_proximity, low_dpr, high_dpr }`
       On no row today: return 404 (monitor falls back to last known price).
       _File: nepse-decisionEngine/dashboard_api.py_
 
-- [ ] **T28** Trading `GET /api/v1/system-account/trades`
+- [x] **T28** Trading `GET /api/v1/system-account/trades`
       Replace direct `paper_trade_log` SQL read in engine's `auditor.py`.
       Returns unaudited rows for `telegram_id='SYSTEM_BOT'`, with `?audited=false&limit=100`.
       _File: nepse-trading/trading_api.py_
@@ -163,6 +171,46 @@ Format: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocked
 - [ ] **T31** Update `engine/auditor.py` to call trading REST (`T28`) instead of direct `paper_trade_log` SQL.
       On TradingServiceError: log + skip this audit cycle, do not crash.
       _File: nepse-decisionEngine/analysis/auditor.py_
+
+---
+
+## Phase 7 — Code cleanup (boundary enforcement)
+
+These files exist in the wrong service and need to move/refactor.
+Schemas and endpoints are already updated — this phase cleans the Python code.
+
+- [ ] **T32** Move `modules/meroshare.py` engine → trading
+      Trading has `user_meroshare` credentials. meroshare.py uses them for live sync.
+      Engine has no user credentials — it cannot use meroshare.py in production.
+      _Move: nepse-decisionEngine/modules/meroshare.py → nepse-trading/modules/meroshare.py_
+
+- [ ] **T33** Move `workflows/briefing.py` engine → trading
+      Briefing sends morning portfolio + signal summary to users.
+      Trading owns users, portfolio, and all notifications.
+      Briefing calls engine `GET /api/v1/signals/today` for signal data.
+      _Move: nepse-decisionEngine/workflows/briefing.py → nepse-trading/modules/briefing.py_
+
+- [ ] **T34** Strip direct Telegram/Discord sends from engine `notifier.py`
+      Engine sends BUY signals via `push_signal()` (done — T18).
+      Remove remaining direct Telegram sends for: WAIT signals, summaries, heartbeat.
+      Replace with calls to `POST /api/v1/notify/admin` on trading (see T35).
+      _File: nepse-decisionEngine/helper/notifier.py_
+
+- [ ] **T35** Trading `POST /api/v1/notify/admin`
+      Engine calls this for non-signal admin alerts (errors, heartbeat, EOD summary).
+      Trading sends via admin's Telegram/Discord channel.
+      Body: { message: str, parse_mode: str, level: "info"|"warn"|"error" }
+      _File: nepse-trading/trading_api.py_
+
+- [ ] **T36** Update engine `auditor.py` to write `trade_journal` via REST
+      Replace direct INSERT into `trade_journal` (engine DB) with
+      POST to `trading_client.create_trade_journal(row)` → `/api/v1/trade-journal`
+      _File: nepse-decisionEngine/analysis/auditor.py_
+
+- [ ] **T37** Add `push_signal()` call to `trading_client.py` for WAIT signals
+      `send_wait_signal` in notifier.py currently sends to admin only via Telegram.
+      Push WAIT signals to trading too so users with WAIT preference get notified.
+      _File: nepse-decisionEngine/clients/trading_client.py_
 
 ---
 

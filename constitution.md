@@ -54,13 +54,45 @@ from db.connection import _db   # ONLY for multi-table atomic transactions
 
 ## Service ownership (enforced by convention)
 
-| Table group | Owner | Rule |
-|---|---|---|
-| `users`, `user_*`, `paper_*`, `signal_deliveries` | nepse-trading | Engine never writes these |
-| `market_log`, `portfolio`, `indicators`, everything else | nepse-decisionEngine | Trading never writes these |
+### nepse-decisionEngine owns
+All market data, signals, and analysis — zero user awareness, zero notifications.
 
-Trading reads engine tables only via REST (`clients/engine_client.py`).
-Engine reads trading tables only via REST (`clients/trading_client.py`).
+| Group | Tables |
+|---|---|
+| Price & market data | `price_history`, `market_breadth`, `indicators`, `indicators_intraday` |
+| Signals | `market_log`, `gate_misses`, `gate_proposals`, `filter_candidates_log` |
+| Scraped data | `atrad_market_watch`, `broker_flow`, `broker_holdings`, `floorsheet`, `floorsheet_signals`, `stealth_signals` |
+| Fundamentals | `fundamentals`, `fundamental_beta` |
+| Macro / geo | `geopolitical_data`, `nepal_pulse`, `nrb_monthly`, `daily_context_log` |
+| Learning | `learning_hub`, `claude_audit`, `accuracy_review_log`, `system_proposals` |
+| Council | `monthly_council_*`, `monthly_override` |
+| Reference | `share_sectors`, `candle_patterns`, `candle_signals`, `fd_rates`, `fd_rate_summary` |
+| AI logs | `ai_call_log`, `agent_trace`, `wait_parse_log` |
+| Config | `settings`, `db_schema`, `nepse_indices`, `saved_queries` |
+| Research | `backtest_results`, `capital_allocation`, `financial_advisor`, `financials` |
+| Political | `news_effect_patterns`, `pattern_validation_log` |
+
+### nepse-trading owns
+All user-facing data, portfolio, notifications, and trade outcomes.
+
+| Group | Tables |
+|---|---|
+| Identity | `users`, `user_channels` |
+| Credentials | `user_meroshare`, `user_broker`, `user_broker_links` |
+| Preferences | `user_signal_preferences` |
+| Paper trading | `paper_capital`, `paper_portfolio`, `paper_trade_log` |
+| Trade outcomes | `trade_journal` — written by engine auditor via REST POST |
+| Notifications | `signal_deliveries` |
+| Logs | `auto_execute_log`, `credential_verify_log`, `admin_audit_log` |
+| Config | `settings` (trading-specific) |
+
+### Hard rules
+- Engine NEVER writes to trading tables directly (separate DB — impossible anyway)
+- Trading NEVER writes to engine tables directly
+- Engine reads trading data → `GET /api/v1/system-account/trades` (T28)
+- Trading reads engine data → `GET /api/v1/signals/today`, `/market/state`, `/symbols/validate`, `/market-watch/ltp`
+- **All notifications** (Telegram, Discord, briefings, summaries) → through trading service only
+- Engine has no TELEGRAM_BOT_TOKEN, no DISCORD_BOT_TOKEN in production
 
 ## Credential security
 
