@@ -175,13 +175,17 @@ def _fetch_nrb_latest() -> dict | None:
     try:
         rows = run_raw_sql(
             """
-            SELECT policy_rate, bank_rate, credit_growth_rate,
+            SELECT COALESCE(policy_rate, (SELECT policy_rate FROM nrb_monthly
+                                          WHERE policy_rate IS NOT NULL ORDER BY id DESC LIMIT 1)) AS policy_rate,
+                   COALESCE(bank_rate, (SELECT bank_rate FROM nrb_monthly
+                                        WHERE bank_rate IS NOT NULL ORDER BY id DESC LIMIT 1)) AS bank_rate,
+                   credit_growth_rate,
                    bop_status, bop_overall_balance_usd_m,
                    overall_sentiment, forward_guidance, key_risks,
                    remittance_yoy_change_pct, cpi_inflation,
                    liquidity_injected_billion, fx_reserve_months
             FROM nrb_monthly
-            ORDER BY fiscal_year DESC, month_number DESC
+            ORDER BY id DESC
             LIMIT 1
             """
         )

@@ -118,10 +118,9 @@ if not ENGINE_API_SECRET:
 SESSION_COOKIE = "nepse_session"
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
-# In-process session store: session_id -> expires_at (monotonic-free, wall clock
-# is fine here since it only needs to survive within one running server process,
-# same pattern as _server_cache below).
-_sessions: dict[str, float] = {}
+# In-process session store: session_id -> {expires_at, type, user_id, telegram_id}
+# type is "admin" for admin sessions issued by /login.
+_sessions: dict[str, dict] = {}
 
 _AUTH_EXEMPT_PATHS = {"/health", "/robots.txt", "/login", "/register"}
 
@@ -135,8 +134,8 @@ def _valid_session(request: Request) -> bool:
     sid = request.cookies.get(SESSION_COOKIE, "")
     if not sid:
         return False
-    expires_at = _sessions.get(sid)
-    if expires_at is None or expires_at < time.time():
+    sess = _sessions.get(sid)
+    if sess is None or sess["expires_at"] < time.time():
         _sessions.pop(sid, None)
         return False
     return True
@@ -197,7 +196,12 @@ def login_submit(body: _LoginBody):
     if not DASHBOARD_AUTH_SECRET or not hmac.compare_digest(body.password, DASHBOARD_AUTH_SECRET):
         raise HTTPException(status_code=401, detail="Incorrect password")
     sid = secrets.token_urlsafe(32)
-    _sessions[sid] = time.time() + SESSION_TTL_SECONDS
+    _sessions[sid] = {
+        "expires_at": time.time() + SESSION_TTL_SECONDS,
+        "type": "admin",
+        "user_id": None,
+        "telegram_id": None,
+    }
     resp = JSONResponse({"status": "ok"})
     resp.set_cookie(
         SESSION_COOKIE, sid, max_age=SESSION_TTL_SECONDS,
@@ -213,6 +217,27 @@ def logout(request: Request):
     resp = JSONResponse({"status": "ok"})
     resp.delete_cookie(SESSION_COOKIE)
     return resp
+
+
+@app.get("/api/v1/auth/validate-session")
+def validate_session(request: Request):
+    """Internal: validate a nepse_session cookie. Called by register_api.py for admin guard."""
+    key = request.headers.get("x-service-key", "")
+    if not ENGINE_API_SECRET or not hmac.compare_digest(key, ENGINE_API_SECRET):
+        raise HTTPException(status_code=403, detail="forbidden")
+    sid = request.headers.get("x-session-cookie", "")
+    if not sid:
+        return {"valid": False, "type": None, "user_id": None, "telegram_id": None}
+    sess = _sessions.get(sid)
+    if sess is None or sess["expires_at"] < time.time():
+        _sessions.pop(sid, None)
+        return {"valid": False, "type": None, "user_id": None, "telegram_id": None}
+    return {
+        "valid": True,
+        "type": sess["type"],
+        "user_id": sess.get("user_id"),
+        "telegram_id": sess.get("telegram_id"),
+    }
 
 
 # The pipeline that produces this data runs every ~6 min, so a response is
@@ -403,6 +428,18 @@ _REGISTER_HTML = os.path.join(os.path.dirname(__file__), "register.html")
 @app.get("/robots.txt", response_class=PlainTextResponse)
 def robots():
     return "User-agent: *\nAllow: /"
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    # Minimal green-dot SVG favicon matching dashboard theme
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+        '<circle cx="16" cy="16" r="14" fill="#0d0f0e" stroke="#4ade80" stroke-width="2"/>'
+        '<circle cx="16" cy="16" r="7" fill="#4ade80"/>'
+        '</svg>'
+    )
+    return Response(content=svg, media_type="image/svg+xml")
 
 
 @app.get("/")
@@ -928,18 +965,24 @@ def get_portfolio():
             if live_monitor:
                 cur.execute("""
                     SELECT symbol, entry_date, entry_price, shares, total_cost,
-                           peak_price, trail_active
+                           peak_price, trail_active, demat_confirmed_date
                     FROM portfolio WHERE status = 'OPEN'
                     ORDER BY entry_date
                 """)
                 for r in _rows(cur):
                     ed = str(r.get("entry_date") or "")[:10]
-                    try:
-                        from calendar_guard import trading_days_since
-                        from datetime import date as _date
-                        tds = trading_days_since(_date.fromisoformat(ed)) if ed else 99
-                    except Exception:
-                        tds = 99
+                    # demat_confirmed_date (set by meroshare.sync) releases the T+3 lock early —
+                    # the day count is only the fallback when Meroshare hasn't confirmed yet.
+                    if r.get("demat_confirmed_date"):
+                        settlement_locked = False
+                    else:
+                        try:
+                            from calendar_guard import trading_days_since
+                            from datetime import date as _date
+                            tds = trading_days_since(_date.fromisoformat(ed)) if ed else 99
+                        except Exception:
+                            tds = 99
+                        settlement_locked = tds < 3
                     live_positions.append({
                         "book": "live",
                         "symbol": r.get("symbol"),
@@ -949,7 +992,7 @@ def get_portfolio():
                         "wacc": r.get("entry_price"),        # recomputed below to all-in per-share
                         "total_cost": r.get("total_cost"),
                         "trail_active": str(r.get("trail_active")).lower() == "true",
-                        "settlement_locked": tds < 3,
+                        "settlement_locked": settlement_locked,
                         "monitored": True,
                         "auto_sell": live_auto_close,
                     })
@@ -1004,8 +1047,45 @@ def get_portfolio():
                         else:
                             ltp_map[sym] = atrad["ltp"]
 
-        from decimal import Decimal as _D
-        from modules.trading_core import calc_buy_fees, calc_sell_fees, hold_days
+        from decimal import Decimal as _D, ROUND_HALF_UP as _RHU
+        from datetime import date as _date_cls
+
+        _SEBON   = _D("0.00015")
+        _DP      = _D("25")
+        _CGT_S   = _D("0.10")
+        _CGT_L   = _D("0.075")
+
+        def _brok(gross):
+            if gross <= _D("2500"):   return _D("10")
+            elif gross <= _D("50000"):  rate = _D("0.0036")
+            elif gross <= _D("500000"): rate = _D("0.0033")
+            elif gross <= _D("2000000"):rate = _D("0.0031")
+            elif gross <= _D("10000000"):rate= _D("0.0027")
+            else:                        rate = _D("0.0024")
+            return (gross * rate).quantize(_D("0.01"), _RHU)
+
+        def calc_buy_fees(price, shares):
+            g = (price * shares).quantize(_D("0.01"), _RHU)
+            b = _brok(g); s = (g * _SEBON).quantize(_D("0.01"), _RHU)
+            return {"gross": g, "brokerage": b, "sebon": s, "dp_fee": _DP,
+                    "total_fees": b + s + _DP, "total_cost": g + b + s + _DP}
+
+        def calc_sell_fees(price, shares, wacc, hold_days_count=0):
+            g = (price * shares).quantize(_D("0.01"), _RHU)
+            b = _brok(g); s = (g * _SEBON).quantize(_D("0.01"), _RHU)
+            tf = b + s + _DP
+            cb = (wacc * shares).quantize(_D("0.01"), _RHU)
+            gp = g - cb
+            rate = _CGT_L if hold_days_count > 365 else _CGT_S
+            cgt = (gp * rate).quantize(_D("0.01"), _RHU) if gp > 0 else _D("0")
+            return {"gross": g, "brokerage": b, "sebon": s, "dp_fee": _DP,
+                    "total_fees": tf, "gross_profit": gp, "cgt_rate": rate,
+                    "cgt": cgt, "net_proceeds": g - tf - cgt,
+                    "net_pnl": g - tf - cgt - cb, "cost_basis": cb}
+
+        def hold_days(date_str):
+            try: return (_date_cls.today() - _date_cls.fromisoformat(date_str)).days
+            except Exception: return 0
 
         for p in open_positions:
             sym  = p.get("symbol", "")
@@ -2027,7 +2107,8 @@ async def api_market_watch_ltp(symbol: str, request: Request):
 
     rows = run_raw_sql(
         """
-        SELECT ltp, vwap, bid_ask_ratio, dpr_proximity, low_dpr, high_dpr
+        SELECT ltp, vwap, bid_ask_ratio, dpr_proximity, low_dpr, high_dpr,
+               time::text AS time
         FROM atrad_market_watch
         WHERE symbol = %s AND date = %s
         ORDER BY time DESC
@@ -2053,7 +2134,7 @@ async def api_signals_today(request: Request):
         """
         SELECT id, symbol, sector, action, confidence, entry_price,
                stop_loss, target, primary_signal, reasoning,
-               gemini_reason, market_state, composite_score,
+               gemini_reason, market_state,
                date, time, timestamp
         FROM market_log
         WHERE date = %s AND outcome = 'PENDING' AND action = 'BUY'

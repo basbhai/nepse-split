@@ -83,11 +83,25 @@ def run(dry_run: bool = False) -> int:
         run_hub()
     results["learning_hub"] = _step("learning_hub (GPT review)", _learning_hub, dry_run)
 
-    # ── Step 1b: Monthly council (every Sunday — internal gate decides) ──────
+    # ── Step 1a: Lesson curator — deterministic check of whether each lesson worked (supplements the review above).
+    # Preview only (writes a report, no DB changes) unless the setting LESSON_CURATOR_APPLY is "true".
+    def _curator():
+        from analysis.lesson_curator import run as run_curator
+        from sheets import get_setting as _g
+        run_curator(apply=_g("LESSON_CURATOR_APPLY", "false").strip().lower() == "true")
+    results["lesson_curator"] = _step("lesson_curator (preview unless LESSON_CURATOR_APPLY)", _curator, dry_run)
+
+    # ── Step 1b: Monthly council — MANUAL ONLY (user decision 2026-10-03) ─────
+    # Run it yourself:  python -m analysis.monthly_council   (add --resume after a cancelled run)
+    # Set COUNCIL_AUTO_RUN=true to put it back on the Sunday schedule (the internal gate then decides).
     def _council():
         from analysis.monthly_council import run as run_council
         run_council()
-    results["monthly_council"] = _step("monthly_council", _council, dry_run)
+    from sheets import get_setting as _gs
+    if _gs("COUNCIL_AUTO_RUN", "false").strip().lower() == "true":
+        results["monthly_council"] = _step("monthly_council", _council, dry_run)
+    else:
+        log.info("── monthly_council — skipped (manual only; COUNCIL_AUTO_RUN is not true)")
 
     # ── Step 1c: Quarterly lesson weight review (Mar/Jun/Sep/Dec only) ──────
     if _is_quarterly_review_month() and results.get("monthly_council"):

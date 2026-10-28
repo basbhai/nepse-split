@@ -46,13 +46,17 @@ CLAUDE_CLI_MODEL = os.getenv("CLAUDE_CLI_MODEL", "claude-sonnet-5")
 # lesson volume grew (see claude_analyst._load_lessons / CLI_LESSON_LIMIT):
 # on 2026-09-15, with the lesson list capped at 25, real calls landed at
 # 71-75s — i.e. right on the timeout edge, with ~50% of first attempts
-# timing out and falling through to a second 75s-capped try. 120s restores
-# genuine margin at that lesson volume. See nepse-project/TODO.md Phase 3
-# for the cycle-timeout math (systemd TimeoutStartSec raised to 600s
-# alongside the original 75s value — re-check that budget if this changes
-# again, since main.py runs on a 30-min timer with several candidates
-# analyzed sequentially per cycle).
-CLI_TIMEOUT_SEC  = int(os.getenv("CLAUDE_CLI_TIMEOUT_SEC", "120"))
+# timing out and falling through to a second 75s-capped try. 120s restored
+# genuine margin at that lesson volume.
+# 2026-09-22: CLI_LESSON_LIMIT raised 25 -> 50 (learning_hub's active pool
+# is 49 and every lesson is MARKET/sector-wide — the 25 cap was dropping
+# roughly half the entire lesson base on every single call, not just a
+# long tail). 240s restores the same kind of margin over 120s that 120s
+# gave over the old 75s baseline, sized for the larger lesson volume.
+# See nepse-trading.service TimeoutStartSec (raised in lockstep) for the
+# cycle-timeout math (MAX_FLAGS_FOR_CLAUDE x CLI_MAX_ATTEMPTS x
+# CLI_TIMEOUT_SEC + buffer) — re-check that budget if this changes again.
+CLI_TIMEOUT_SEC  = int(os.getenv("CLAUDE_CLI_TIMEOUT_SEC", "240"))
 CLI_MAX_ATTEMPTS = int(os.getenv("CLAUDE_CLI_MAX_ATTEMPTS", "2"))   # 1 try + 1 retry
 CLI_CWD          = "/tmp"
 

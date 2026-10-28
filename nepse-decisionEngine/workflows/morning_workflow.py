@@ -126,10 +126,15 @@ def run(dry_run: bool = False, skip_guard: bool = False) -> int:
         run_alloc()
     results["allocator"] = _step("capital_allocator (wealth mgmt)", _allocator, dry_run)
 
-    # ── Step 8: Morning briefing ──────────────────────────────────────────────
+    # ── Step 8: Morning briefing (trading service sends per-user) ────────────
     def _briefing():
-        from workflows.briefing import run as run_brief
-        run_brief()
+        from clients.trading_client import trigger_briefing, TradingServiceError
+        try:
+            trigger_briefing()
+        except TradingServiceError as e:
+            log.warning("trigger_briefing failed: %s — falling back to local brief", e)
+            from workflows.briefing import run as run_brief
+            run_brief()
     results["briefing"] = _step("briefing (Telegram message)", _briefing, dry_run)
 
     # ── Summary ───────────────────────────────────────────────────────────────

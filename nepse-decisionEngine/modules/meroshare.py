@@ -34,6 +34,7 @@ CREDENTIALS NEEDED IN .env:
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -126,27 +127,43 @@ class PortfolioSummary:
 # SECTION 1 — MEROSHARE AUTH
 # ══════════════════════════════════════════════════════════════════════════════
 
+LOGIN_MAX_ATTEMPTS  = 3
+LOGIN_RETRY_SECONDS = 12
+
+
 def _get_token() -> Optional[str]:
     payload = {
         "clientId": os.getenv("MEROSHARE_DP_ID"),
         "username": os.getenv("MEROSHARE_USERNAME"),
         "password": os.getenv("MEROSHARE_PASSWORD"),
     }
-    try:
-        r = requests.post(AUTH_URL, json=payload,
-                          headers=MEROSHARE_HEADERS, timeout=15)
-        if r.status_code != 200:
-            log.error("Meroshare login failed: %d — %s", r.status_code, r.text[:200])
+    # Meroshare answers a login within ~10s of the previous one with HTTP 500
+    # "Unable to process request" (confirmed live 2026-09-24: 0s and 3s gaps
+    # failed, 10s worked) — summary_workflow logs in for EDIS then again for
+    # the portfolio sync back to back. Retry ONLY that 500, spaced out; a 401/403
+    # (wrong credentials) is never retried, to avoid tripping an account lockout.
+    for attempt in range(1, LOGIN_MAX_ATTEMPTS + 1):
+        try:
+            r = requests.post(AUTH_URL, json=payload,
+                              headers=MEROSHARE_HEADERS, timeout=15)
+            if r.status_code == 500 and attempt < LOGIN_MAX_ATTEMPTS:
+                log.warning("Meroshare login 500 (attempt %d/%d) — retrying in %ds",
+                            attempt, LOGIN_MAX_ATTEMPTS, LOGIN_RETRY_SECONDS)
+                time.sleep(LOGIN_RETRY_SECONDS)
+                continue
+            if r.status_code != 200:
+                log.error("Meroshare login failed: %d — %s", r.status_code, r.text[:200])
+                return None
+            token = r.headers.get("Authorization")
+            if not token:
+                log.error("Token not in response headers")
+                return None
+            log.info("Meroshare login OK")
+            return token
+        except Exception as e:
+            log.error("Meroshare login error: %s", e)
             return None
-        token = r.headers.get("Authorization")
-        if not token:
-            log.error("Token not in response headers")
-            return None
-        log.info("Meroshare login OK")
-        return token
-    except Exception as e:
-        log.error("Meroshare login error: %s", e)
-        return None
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -400,88 +417,118 @@ def _portfolio_entry_date(symbol: str, fallback: str) -> str:
     return fallback
 
 
+REOPEN_COOLDOWN_TRADING_DAYS = 5  # a CLOSED scrip isn't re-added from DEMAT before this
+EDIS_FALLBACK_TRADING_DAYS   = 3  # missing from DEMAT this long with no EDIS seen → close
+
+
+def _recently_closed(exit_date) -> bool:
+    from calendar_guard import trading_days_since
+    from datetime import date as _date
+    try:
+        return bool(exit_date) and trading_days_since(_date.fromisoformat(str(exit_date)[:10])) < REOPEN_COOLDOWN_TRADING_DAYS
+    except ValueError:
+        return False
+
+
+def _more_than_sold(demat_shares, closed_row_shares) -> bool:
+    """Meroshare showing strictly more than was sold means a fresh buy, not settling shares."""
+    try:
+        return float(demat_shares) > float(closed_row_shares or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _write_portfolio(holdings: list[Holding]) -> int:
     """
     Sync the DEMAT holdings into `portfolio` (one row per symbol — the table has
     a UNIQUE(symbol) constraint).
 
-    - Symbol already OPEN  → UPDATE only cost-basis + market-data columns.
-      entry_date, peak_price, stop_*, trail_* are left untouched: the execution
-      monitor owns the trailing-stop state, and entry_date must stay the real
-      purchase date (resetting it to today would re-arm the T+3 gate forever).
+    - Symbol already OPEN  → UPDATE cost-basis + market-data, clear missing_since.
     - Symbol exists but CLOSED (re-bought) → reopen: fresh entry_date + reset
       stop/peak/trail.
     - New symbol → INSERT.
-    - OPEN symbol not in the DEMAT → mark CLOSED, UNLESS it's still inside its
-      T+3 settlement window (same SETTLEMENT_TRADING_DAYS gate execution_monitor
-      uses before allowing a sell) — a same-day/T+1/T+2 buy can't possibly be
-      in myPortfolio yet, that's not settled, it's not sold. Confirmed live:
-      2026-09-16 sync marked a T+1 SHL buy CLOSED/'SOLD' this way, silently
-      dropping it from execution_monitor's guard while the shares were still
-      genuinely held.
+    - OPEN symbol not in the DEMAT → first miss stamps missing_since; still missing
+      after EDIS_FALLBACK_TRADING_DAYS trading days → CLOSED. Guard: if that would
+      close >half the open book at once, treat as bad API response and close none.
     """
     from calendar_guard import trading_days_since
     from datetime import date as _date
-    from modules.execution_monitor import SETTLEMENT_TRADING_DAYS
 
     written        = 0
     today          = datetime.now(tz=NST).strftime("%Y-%m-%d")
     active_symbols = {h.symbol for h in holdings}
 
     try:
-        for row in run_raw_sql(
-            "SELECT id, symbol, entry_date FROM portfolio WHERE status = 'OPEN'"
-        ):
-            if row["symbol"] in active_symbols:
-                continue
-            entry_date_str = row.get("entry_date")
-            if entry_date_str:
-                try:
-                    entry_d = _date.fromisoformat(str(entry_date_str)[:10])
-                    if trading_days_since(entry_d) < SETTLEMENT_TRADING_DAYS:
-                        log.info(
-                            "  %-10s — not in DEMAT yet but still inside T+%d "
-                            "settlement (entry %s), leaving OPEN",
-                            row["symbol"], SETTLEMENT_TRADING_DAYS, entry_date_str,
-                        )
-                        continue
-                except ValueError:
-                    pass
+        open_rows = run_raw_sql(
+            "SELECT id, symbol, missing_since FROM portfolio WHERE status = 'OPEN'"
+        ) or []
+        missing = [r for r in open_rows if r["symbol"] not in active_symbols]
+        due = []
+        for row in missing:
+            ms = row.get("missing_since")
+            try:
+                gone_days = trading_days_since(_date.fromisoformat(str(ms)[:10])) if ms else 0
+            except ValueError:
+                gone_days = 0
+            if not ms:
+                execute_dml("UPDATE portfolio SET missing_since=%s WHERE id=%s",
+                            (today, row["id"]))
+                log.info("  %-10s — not in DEMAT (first miss %s), keeping OPEN until "
+                         "EDIS or %d trading days", row["symbol"], today,
+                         EDIS_FALLBACK_TRADING_DAYS)
+            elif gone_days >= EDIS_FALLBACK_TRADING_DAYS:
+                due.append(row)
+        if len(due) > 1 and len(due) > len(open_rows) / 2:
+            names = ", ".join(r["symbol"] for r in due)
+            log.error("Sync would close %d of %d open rows at once (%s) — looks like a "
+                      "bad Meroshare response, closing NONE", len(due), len(open_rows), names)
+            try:
+                from helper.notifier import send_telegram
+                send_telegram(f"⚠️ *Portfolio sync guard* — {len(due)} of {len(open_rows)} "
+                              f"open rows missing from Meroshare ({names}); closed none.",
+                              parse_mode="Markdown")
+            except Exception as _e:
+                log.warning("guard alert failed: %s", _e)
+            due = []
+        for row in due:
             execute_dml(
                 "UPDATE portfolio SET status='CLOSED', exit_date=%s, "
-                "exit_reason=COALESCE(exit_reason,'SOLD') WHERE id=%s",
+                "exit_reason=COALESCE(exit_reason,'SOLD_NOT_IN_DEMAT') WHERE id=%s",
                 (today, row["id"]),
             )
-            log.info("  %-10s → marked CLOSED (no longer in DEMAT)", row["symbol"])
+            log.info("  %-10s → marked CLOSED (missing from DEMAT since %s)",
+                     row["symbol"], row.get("missing_since"))
     except Exception as e:
         log.warning("Could not mark closed positions: %s", e)
 
     for h in holdings:
         try:
             existing = run_raw_sql(
-                "SELECT id, status FROM portfolio WHERE symbol=%s LIMIT 1", (h.symbol,)
+                "SELECT id, status, exit_date, shares FROM portfolio WHERE symbol=%s LIMIT 1", (h.symbol,)
             )
+            if (existing and str(existing[0].get("status", "")).upper() != "OPEN"
+                    and _recently_closed(existing[0].get("exit_date"))
+                    and not _more_than_sold(h.shares, existing[0].get("shares"))):
+                log.info("  %-10s — closed %s, still in DEMAT (settling) — not re-added",
+                         h.symbol, existing[0].get("exit_date"))
+                continue
             if existing and str(existing[0].get("status", "")).upper() == "OPEN":
-                # Reaching here means h.symbol IS in this sync's myPortfolio —
-                # real confirmation the shares have actually landed in DEMAT.
-                # Stamp it so execution_monitor's settlement gate can release
-                # the position early instead of always waiting fixed T+3 days.
                 ok = execute_dml(
                     "UPDATE portfolio SET entry_price=%s, shares=%s, total_cost=%s, "
                     "current_price=%s, current_value=%s, pnl_npr=%s, pnl_pct=%s, "
-                    "demat_confirmed_date=COALESCE(demat_confirmed_date, %s) "
+                    "demat_confirmed_date=COALESCE(demat_confirmed_date, %s), "
+                    "missing_since=NULL "
                     "WHERE id=%s",
                     (h.wacc, h.shares, h.total_cost, h.current_price,
                      h.current_value, h.pnl_npr, h.pnl_pct, today, existing[0]["id"]),
                 )
             elif existing:  # exists but CLOSED → reopen
-                # h is from this sync's myPortfolio, so it's demat-confirmed
-                # as of today — fresh position, fresh confirmation date.
                 ok = execute_dml(
                     "UPDATE portfolio SET status='OPEN', entry_date=%s, entry_price=%s, "
                     "shares=%s, total_cost=%s, current_price=%s, current_value=%s, "
                     "pnl_npr=%s, pnl_pct=%s, peak_price=NULL, trail_active=NULL, "
                     "trail_stop=NULL, exit_date=NULL, exit_price=NULL, exit_reason=NULL, "
+                    "missing_since=NULL, "
                     "demat_confirmed_date=%s "
                     "WHERE id=%s",
                     (_portfolio_entry_date(h.symbol, today), h.wacc, h.shares,
@@ -505,6 +552,52 @@ def _write_portfolio(holdings: list[Holding]) -> int:
             log.warning("Failed to write %s: %s", h.symbol, e)
 
     return written
+
+
+def close_from_edis(summary: dict, dry_run: bool = False) -> int:
+    """
+    Close (or shrink) live `portfolio` rows for scrips CDSC shows a sold-share
+    EDIS settlement for — real proof of a sale, days before shares leave myPortfolio.
+    Called by summary_workflow right after run_edis().
+
+    - qty >= row shares → CLOSED, exit_reason 'SOLD_EDIS'
+    - qty <  row shares → partial sale: shares reduced (only for succeeded settlements)
+    Returns rows touched. Never raises.
+    """
+    if dry_run:
+        return 0
+    touched = 0
+    today = datetime.now(tz=NST).strftime("%Y-%m-%d")
+    try:
+        for st in summary.get("settlements", []) or []:
+            for sym, qty in (st.get("by_scrip") or {}).items():
+                rows = run_raw_sql(
+                    "SELECT id, shares, entry_price FROM portfolio "
+                    "WHERE symbol=%s AND status='OPEN' LIMIT 1", (sym,))
+                if not rows or qty <= 0:
+                    continue
+                held = float(rows[0].get("shares") or 0)
+                if qty >= held:
+                    ok = execute_dml(
+                        "UPDATE portfolio SET status='CLOSED', exit_date=%s, "
+                        "exit_reason=COALESCE(exit_reason,'SOLD_EDIS') WHERE id=%s",
+                        (today, rows[0]["id"]))
+                    log.info("  %-10s → CLOSED (EDIS %s: %.0f sh)", sym, st.get("settlement"), qty)
+                elif st.get("ok"):
+                    left = held - qty
+                    ok = execute_dml(
+                        "UPDATE portfolio SET shares=%s, total_cost=%s WHERE id=%s",
+                        (str(int(left) if left == int(left) else left),
+                         str(round(left * float(rows[0].get("entry_price") or 0), 2)),
+                         rows[0]["id"]))
+                    log.info("  %-10s → shares %.0f → %.0f (partial EDIS %s)",
+                             sym, held, left, st.get("settlement"))
+                else:
+                    continue
+                touched += 1 if ok else 0
+    except Exception as e:
+        log.error("close_from_edis error: %s", e)
+    return touched
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 5B — AUTO-EDIS (Electronic Delivery Instruction Slip)
@@ -656,7 +749,8 @@ def _submit_edis_for_settlement(token: str, settlement_id: str, dry_run: bool = 
     Returns {"settlement": id, "scrips": [..], "qty": N, "ok": bool, "detail": str}.
     """
     headers = {**MEROSHARE_HEADERS, "Authorization": token}
-    res = {"settlement": settlement_id, "scrips": [], "qty": 0.0, "ok": False, "detail": ""}
+    res = {"settlement": settlement_id, "scrips": [], "qty": 0.0, "by_scrip": {},
+           "ok": False, "detail": ""}
     try:
         r = requests.get(EDIS_DETAIL_URL + str(settlement_id), headers=headers, timeout=15)
         if r.status_code != 200:
@@ -670,6 +764,10 @@ def _submit_edis_for_settlement(token: str, settlement_id: str, dry_run: bool = 
 
         res["scrips"] = sorted({str(it.get("obligation", {}).get("scriptCode", "")) for it in items})
         res["qty"]    = sum(float(it.get("transferQuantity", 0) or 0) for it in items)
+        for it in items:
+            sc = str(it.get("obligation", {}).get("scriptCode", "")).upper().strip()
+            if sc:
+                res["by_scrip"][sc] = res["by_scrip"].get(sc, 0.0) + float(it.get("transferQuantity", 0) or 0)
 
         check_payload = [{**it, "isEdit": True} for it in items]
         rc = requests.post(EDIS_TRANSFER_CHECK_URL, headers=headers, json=check_payload, timeout=20)

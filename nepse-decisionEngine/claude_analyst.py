@@ -270,7 +270,7 @@ def _load_macro_context() -> dict:
         }
 
 
-CLI_LESSON_LIMIT = int(os.getenv("CLAUDE_CLI_LESSON_LIMIT", "25"))
+CLI_LESSON_LIMIT = int(os.getenv("CLAUDE_CLI_LESSON_LIMIT", "50"))
 
 
 def _load_lessons(symbol: str, sector: str, limit: int = 14) -> tuple[list[str], set[int]]:
@@ -313,7 +313,7 @@ def _load_lessons(symbol: str, sector: str, limit: int = 14) -> tuple[list[str],
         rows = run_raw_sql(
             """
             SELECT id, symbol, sector, lesson_type, condition, finding, action,
-                   confidence_level, win_rate, trade_count, source, source_weight
+                   confidence_level, win_rate, trade_count, source, source_weight, directive
             FROM learning_hub
             WHERE active = 'true'
               AND (symbol = %s OR sector = %s OR symbol = 'MARKET' OR applies_to = 'ALL')
@@ -406,8 +406,9 @@ def _load_lessons(symbol: str, sector: str, limit: int = 14) -> tuple[list[str],
             wr     = r.get("win_rate",    "")
             n      = r.get("trade_count", "")
             stat   = f" (win_rate={wr}, n={n})" if n else ""
+            do     = f" DO: {r['directive']}" if r.get("directive") else ""
             # ID prefix lets Claude echo the numeric ID back in lessons_applied
-            lessons.append(f"[ID:{row_id}|{sym}|{ltype}|{conf}] IF {cond} -> {act}: {find}{stat}")
+            lessons.append(f"[ID:{row_id}|{sym}|{ltype}|{conf}] IF {cond} -> {act}: {find}{stat}{do}")
 
         valid_ids = {r["id"] for r in sorted_rows if r.get("id") is not None}
         return lessons, valid_ids

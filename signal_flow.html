@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NEPSE Signal Pipeline — Live Visualization</title>
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --surface: #111827;
+    --surface2: #1a2235;
+    --border: #1e2d45;
+    --engine-color: #3b82f6;
+    --engine-glow: #60a5fa;
+    --trading-color: #10b981;
+    --trading-glow: #34d399;
+    --data-color: #f59e0b;
+    --data-glow: #fbbf24;
+    --signal-color: #a855f7;
+    --signal-glow: #c084fc;
+    --text: #e2e8f0;
+    --text-muted: #64748b;
+    --text-dim: #94a3b8;
+    --success: #22c55e;
+    --warn: #eab308;
+    --rest-color: #f97316;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Courier New', monospace;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── HEADER ─────────────────────────────────── */
+  .header {
+    padding: 18px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .header h1 {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--engine-color);
+  }
+  .header .subtitle { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .nst-clock {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 13px;
+    color: var(--data-color);
+    letter-spacing: 2px;
+  }
+  .status-bar {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 8px var(--success);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* ── MAIN CANVAS AREA ───────────────────────── */
+  .pipeline {
+    display: grid;
+    grid-template-columns: 200px 1fr 60px 1fr 160px;
+    gap: 0;
+    padding: 28px 24px;
+    min-height: calc(100vh - 140px);
+    align-items: start;
+  }
+
+  /* ── COLUMN HEADERS ─────────────────────────── */
+  .col-header {
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    font-weight: 700;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .col-data      .col-header { color: var(--data-color); }
+  .col-engine    .col-header { color: var(--engine-color); }
+  .col-rest      .col-header { color: var(--rest-color); text-align:center; }
+  .col-trading   .col-header { color: var(--trading-color); }
+  .col-users     .col-header { color: var(--signal-color); }
+
+  /* ── SERVICE BOX ────────────────────────────── */
+  .svc-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    position: relative;
+    transition: all .3s ease;
+    cursor: default;
+  }
+  .svc-box.active-engine {
+    border-color: var(--engine-color);
+    background: #0f1e38;
+    box-shadow: 0 0 24px rgba(59,130,246,.25), inset 0 0 20px rgba(59,130,246,.05);
+  }
+  .svc-box.active-trading {
+    border-color: var(--trading-color);
+    background: #0a1f1a;
+    box-shadow: 0 0 24px rgba(16,185,129,.25), inset 0 0 20px rgba(16,185,129,.05);
+  }
+  .svc-box.active-data {
+    border-color: var(--data-color);
+    background: #1a150a;
+    box-shadow: 0 0 24px rgba(245,158,11,.25), inset 0 0 20px rgba(245,158,11,.05);
+  }
+  .svc-box.active-signal {
+    border-color: var(--signal-color);
+    background: #1a0f2e;
+    box-shadow: 0 0 24px rgba(168,85,247,.3), inset 0 0 20px rgba(168,85,247,.07);
+  }
+
+  .svc-title {
+    font-size: 11px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    letter-spacing: .5px;
+  }
+  .svc-file {
+    font-size: 9px;
+    color: var(--text-muted);
+    font-style: italic;
+    margin-bottom: 6px;
+  }
+  .svc-desc {
+    font-size: 10px;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+  .tag {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    margin-top: 6px;
+    margin-right: 4px;
+  }
+  .tag-engine  { background: rgba(59,130,246,.2);  color: var(--engine-glow); }
+  .tag-trading { background: rgba(16,185,129,.2);  color: var(--trading-glow); }
+  .tag-data    { background: rgba(245,158,11,.2);  color: var(--data-glow); }
+  .tag-signal  { background: rgba(168,85,247,.2);  color: var(--signal-glow); }
+  .tag-rest    { background: rgba(249,115,22,.2);  color: #fb923c; }
+
+  /* ── REST BOUNDARY ──────────────────────────── */
+  .col-rest {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 40px;
+  }
+  .rest-pipe {
+    width: 2px;
+    flex-grow: 1;
+    min-height: 400px;
+    position: relative;
+    overflow: hidden;
+    background: var(--border);
+    border-radius: 2px;
+  }
+  .rest-pipe-label {
+    font-size: 8px;
+    letter-spacing: 2px;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    color: var(--rest-color);
+    opacity: .7;
+    margin-top: 12px;
+  }
+  .rest-particle {
+    position: absolute;
+    width: 100%;
+    height: 40px;
+    background: linear-gradient(180deg, transparent, var(--rest-color), transparent);
+    animation: flowDown 2s linear infinite;
+    opacity: 0;
+  }
+  @keyframes flowDown {
+    0%   { top: -40px; opacity: 0; }
+    10%  { opacity: 1; }
+    90%  { opacity: 1; }
+    100% { top: 100%; opacity: 0; }
+  }
+  .rest-particle.active { opacity: 1; }
+  .rest-pipe.flowing .rest-particle { animation: flowDown 1.2s linear infinite; }
+
+  /* ── STEP INDICATOR ─────────────────────────── */
+  .step-badge {
+    position: absolute;
+    top: 10px; right: 10px;
+    background: var(--signal-color);
+    color: white;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 10px;
+    opacity: 0;
+    transition: opacity .3s;
+  }
+  .svc-box.active-engine .step-badge,
+  .svc-box.active-trading .step-badge,
+  .svc-box.active-data .step-badge,
+  .svc-box.active-signal .step-badge { opacity: 1; }
+
+  /* ── BUY SIGNAL BURST ───────────────────────── */
+  .signal-burst {
+    display: none;
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    z-index: 100;
+    pointer-events: none;
+  }
+  .signal-burst.show { display: block; animation: burst .8s forwards; }
+  @keyframes burst {
+    0%  { opacity:0; transform:translate(-50%,-50%) scale(.5); }
+    40% { opacity:1; transform:translate(-50%,-50%) scale(1.1); }
+    70% { opacity:1; transform:translate(-50%,-50%) scale(1); }
+    100%{ opacity:0; transform:translate(-50%,-50%) scale(1.2); }
+  }
+  .burst-label {
+    font-size: 36px;
+    font-weight: 900;
+    color: var(--success);
+    text-shadow: 0 0 30px var(--success), 0 0 60px var(--success);
+    letter-spacing: 4px;
+  }
+  .burst-sub { font-size: 14px; color: var(--text-dim); margin-top: 6px; }
+
+  /* ── CONTROLS ───────────────────────────────── */
+  .controls {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 12px 32px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    z-index: 50;
+  }
+  .btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    padding: 7px 18px;
+    border-radius: 6px;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: all .2s;
+  }
+  .btn:hover { background: var(--border); }
+  .btn.primary {
+    background: var(--engine-color);
+    border-color: var(--engine-color);
+    color: white;
+    font-weight: 700;
+  }
+  .btn.primary:hover { background: var(--engine-glow); }
+  .btn.danger {
+    border-color: #ef4444;
+    color: #ef4444;
+  }
+  .step-log {
+    flex: 1;
+    font-size: 11px;
+    color: var(--data-color);
+    padding: 6px 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    min-height: 30px;
+    transition: all .3s;
+  }
+  .step-counter {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  /* ── TIMELINE ───────────────────────────────── */
+  .timeline {
+    margin: 0 24px 76px;
+    padding: 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .timeline-title {
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .timeline-track {
+    position: relative;
+    height: 32px;
+  }
+  .tl-bg {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    left: 0; right: 0; height: 2px;
+    background: var(--border);
+  }
+  .tl-event {
+    position: absolute;
+    top: 0;
+    display: flex; flex-direction: column; align-items: center;
+    transform: translateX(-50%);
+  }
+  .tl-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    border: 2px solid;
+    background: var(--bg);
+    margin-bottom: 4px;
+    margin-top: 4px;
+  }
+  .tl-label {
+    font-size: 8px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    margin-top: 2px;
+    text-align: center;
+  }
+  .tl-time {
+    font-size: 8px;
+    letter-spacing: 1px;
+    white-space: nowrap;
+  }
+  .tl-block {
+    position: absolute;
+    top: 30%;
+    height: 40%;
+    border-radius: 3px;
+    opacity: .5;
+  }
+
+  /* ── DB BADGE ───────────────────────────────── */
+  .db-badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 9px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-top: 6px;
+  }
+  .db-engine { background: rgba(59,130,246,.15); color: #93c5fd; border: 1px solid rgba(59,130,246,.3); }
+  .db-trading{ background: rgba(16,185,129,.15); color: #6ee7b7; border: 1px solid rgba(16,185,129,.3); }
+
+  /* ── PORT BADGE ─────────────────────────────── */
+  .port { font-size: 9px; color: #64748b; float: right; }
+
+  /* ── SEPARATOR ──────────────────────────────── */
+  .sep { height: 1px; background: var(--border); margin: 8px 0; opacity: .5; }
+
+  /* ── USER CARD ──────────────────────────────── */
+  .user-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    font-size: 10px;
+    transition: all .3s;
+  }
+  .user-card.active-signal {
+    border-color: var(--signal-color);
+    box-shadow: 0 0 16px rgba(168,85,247,.2);
+  }
+  .user-card.active-trading {
+    border-color: var(--trading-color);
+    box-shadow: 0 0 16px rgba(16,185,129,.2);
+  }
+  .user-icon { font-size: 16px; margin-bottom: 4px; }
+  .user-name { font-size: 11px; font-weight: 700; }
+  .user-meta { color: var(--text-muted); font-size: 9px; }
+
+  /* ── ARROW CONNECTOR ────────────────────────── */
+  .arrow-row {
+    display: flex;
+    align-items: center;
+    margin: 6px 0;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+  .arrow-row .arrow { color: var(--engine-color); }
+
+  /* ── PARTICLE CANVAS ────────────────────────── */
+  #particle-canvas {
+    position: fixed;
+    top: 0; left: 0;
+    pointer-events: none;
+    z-index: 1;
+    opacity: .6;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="particle-canvas"></canvas>
+
+<!-- SIGNAL BURST overlay -->
+<div class="signal-burst" id="signalBurst">
+  <div class="burst-label">▲ BUY</div>
+  <div class="burst-sub" id="burstSym">SYMBOL @ PRICE</div>
+</div>
+
+<!-- HEADER -->
+<div class="header">
+  <div>
+    <div class="header h1" style="font-size:14px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:#3b82f6;">NEPSE SIGNAL PIPELINE</div>
+    <div class="subtitle">nepse-decisionEngine → REST → nepse-trading → Users</div>
+  </div>
+  <div class="status-bar">
+    <div class="status-dot" id="marketDot"></div>
+    <span id="marketStatus">MARKET CLOSED</span>
+    <span style="color:var(--border)">|</span>
+    <span>engine :8766</span>
+    <span style="color:var(--border)">|</span>
+    <span>trading :8767</span>
+    <span style="color:var(--border)">|</span>
+    <span>register :8768</span>
+  </div>
+  <div class="nst-clock" id="clock">-- : -- : -- NST</div>
+</div>
+
+<!-- MAIN PIPELINE -->
+<div class="pipeline">
+
+  <!-- COL 1: DATA SOURCES -->
+  <div class="col-data">
+    <div class="col-header">DATA SOURCES</div>
+
+    <div class="svc-box" id="box-atrad">
+      <span class="step-badge" id="step-atrad">STEP 1</span>
+      <div class="svc-title">ATrad / TMS49</div>
+      <div class="svc-file">modules/atrad_scraper.py</div>
+      <div class="svc-desc">Live market watch: LTP, VWAP, bid/ask, DPR proximity. Every market tick → <code>atrad_market_watch</code> table.</div>
+      <span class="tag tag-data">SCRAPER</span>
+      <div class="db-badge db-engine">⬡ nepse_decision_engine</div>
+    </div>
+
+    <div class="svc-box" id="box-history">
+      <div class="svc-title">Price History</div>
+      <div class="svc-file">modules/scraper.py</div>
+      <div class="svc-desc">EOD OHLCV data from TMS. Bootstrap + daily update → <code>price_history</code>.</div>
+      <span class="tag tag-data">EOD</span>
+    </div>
+
+    <div class="svc-box" id="box-indicators">
+      <div class="svc-title">Indicators Refresh</div>
+      <div class="svc-file">modules/indicators.py</div>
+      <div class="svc-desc">RSI, MACD, EMA20/50, BB, OBV, ATR computed nightly. Stored in <code>indicators</code> table.</div>
+      <span class="tag tag-data">NIGHTLY</span>
+    </div>
+
+    <div class="svc-box" id="box-macro">
+      <div class="svc-title">Macro Context</div>
+      <div class="svc-file">modules/nepal_pulse.py · geo_sentiment.py</div>
+      <div class="svc-desc">Nepal macro events, NRB policy, geo risk (VIX, Crude, Nifty). Scores injected into every analysis.</div>
+      <span class="tag tag-data">CONTEXT</span>
+    </div>
+
+    <div class="svc-box" id="box-meroshare">
+      <div class="svc-title">Meroshare Sync</div>
+      <div class="svc-file">modules/meroshare.py</div>
+      <div class="svc-desc">Live DEMAT balance + cost basis. Stamps <code>demat_confirmed_date</code> to release T+3 settlement lock.</div>
+      <span class="tag tag-data">CDSC</span>
+    </div>
+  </div>
+
+  <!-- COL 2: ENGINE -->
+  <div class="col-engine" style="padding-left:16px">
+    <div class="col-header" style="display:flex;justify-content:space-between">
+      <span>nepse-decisionEngine</span>
+      <span class="port">:8766</span>
+    </div>
+
+    <div class="svc-box" id="box-morning">
+      <span class="step-badge" id="step-morning">STEP 2</span>
+      <div class="svc-title">Morning Workflow <span style="color:var(--text-muted);font-weight:400;font-size:10px">10:30 AM NST</span></div>
+      <div class="svc-file">workflows/morning_workflow.py</div>
+      <div class="svc-desc">Calendar guard → meroshare sync → indicators → macro context → capital allocator → trigger briefing (→ trading REST).</div>
+      <span class="tag tag-engine">WORKFLOW</span>
+    </div>
+
+    <div class="svc-box" id="box-filter">
+      <span class="step-badge" id="step-filter">STEP 3</span>
+      <div class="svc-title">Filter Pipeline <span style="color:var(--text-muted);font-weight:400;font-size:10px">every 10 min</span></div>
+      <div class="svc-file">filter_common.py → filter_engine.py</div>
+      <div class="svc-desc">
+        <div class="arrow-row"><span class="arrow">→</span> <code>_load_context()</code> fetches positions via trading REST</div>
+        <div class="arrow-row"><span class="arrow">→</span> Volume filter (≥1.5× avg)</div>
+        <div class="arrow-row"><span class="arrow">→</span> RSI gate (30–70)</div>
+        <div class="arrow-row"><span class="arrow">→</span> MACD + BB confluence</div>
+        <div class="arrow-row"><span class="arrow">→</span> Sector concentration check</div>
+        <div class="arrow-row"><span class="arrow">→</span> Max positions gate</div>
+      </div>
+      <span class="tag tag-engine">FILTER</span>
+      <span class="tag tag-rest">REST →</span>
+    </div>
+
+    <div class="svc-box" id="box-ai">
+      <span class="step-badge" id="step-ai">STEP 4</span>
+      <div class="svc-title">AI Analysis</div>
+      <div class="svc-file">claude_analyst.py · AI/openrouter.py</div>
+      <div class="svc-desc">
+        <div class="arrow-row"><span class="arrow">1.</span> Gemini pre-screen (gemini_filter.py) — fast flag</div>
+        <div class="arrow-row"><span class="arrow">2.</span> Claude analysis — 40+ factor prompt with lessons</div>
+        <div class="arrow-row"><span class="arrow">3.</span> Returns BUY / WAIT / SKIP with confidence + SL/TP</div>
+      </div>
+      <span class="tag tag-engine">GEMINI</span>
+      <span class="tag tag-engine">CLAUDE</span>
+    </div>
+
+    <div class="svc-box" id="box-notifier">
+      <span class="step-badge" id="step-notifier">STEP 5</span>
+      <div class="svc-title">Signal Notifier</div>
+      <div class="svc-file">helper/notifier.py → clients/trading_client.py</div>
+      <div class="svc-desc">
+        BUY/WAIT signals → <code>push_signal()</code> → <code>POST /api/v1/webhook/signal</code> on trading service.
+        <br>Admin-only alerts stay direct (heartbeat, errors, EOD — resilience design).
+      </div>
+      <span class="tag tag-engine">PUSH</span>
+      <span class="tag tag-rest">→ :8767</span>
+      <div class="db-badge db-engine">⬡ market_log</div>
+    </div>
+
+    <div class="sep"></div>
+
+    <div class="svc-box" id="box-eod">
+      <div class="svc-title">EOD Workflow <span style="color:var(--text-muted);font-weight:400;font-size:10px">3:15 PM NST</span></div>
+      <div class="svc-file">workflows/summary_workflow.py</div>
+      <div class="svc-desc">Auto-EDIS → live portfolio sync → candle detect → auditor → gate miss tracker → floorsheet → broker flow → daily context → backup.</div>
+      <span class="tag tag-engine">15 STEPS</span>
+    </div>
+
+    <div class="svc-box" id="box-learning">
+      <div class="svc-title">Learning Hub <span style="color:var(--text-muted);font-weight:400;font-size:10px">weekly</span></div>
+      <div class="svc-file">analysis/learning_hub.py · monthly_council.py</div>
+      <div class="svc-desc">DeepSeek reviews outcomes → distills lessons → feeds back into next Claude prompts. Monthly council votes on threshold changes.</div>
+      <span class="tag tag-engine">LEARN</span>
+      <div class="db-badge db-engine">⬡ learning_hub</div>
+    </div>
+  </div>
+
+  <!-- COL 3: REST BOUNDARY -->
+  <div class="col-rest">
+    <div class="col-header">REST</div>
+    <div class="rest-pipe" id="restPipe">
+      <div class="rest-particle" style="animation-delay:0s"></div>
+      <div class="rest-particle" style="animation-delay:.6s"></div>
+      <div class="rest-particle" style="animation-delay:1.2s"></div>
+    </div>
+    <div class="rest-pipe-label">HTTP / JSON</div>
+  </div>
+
+  <!-- COL 4: TRADING -->
+  <div class="col-trading" style="padding-left:8px">
+    <div class="col-header" style="display:flex;justify-content:space-between">
+      <span>nepse-trading</span>
+      <span class="port">:8767 / :8768</span>
+    </div>
+
+    <div class="svc-box" id="box-webhook">
+      <span class="step-badge" id="step-webhook">STEP 6</span>
+      <div class="svc-title">Signal Webhook</div>
+      <div class="svc-file">trading_api.py → POST /api/v1/webhook/signal</div>
+      <div class="svc-desc">
+        Receives signal from engine. Deduplicates via <code>signal_deliveries</code> (UNIQUE per symbol+date+user+channel).
+        <br>Fetches approved users + their broker links in one bulk query.
+        <br>Fires async fan-out.
+      </div>
+      <span class="tag tag-trading">DEDUP</span>
+      <span class="tag tag-trading">FANOUT</span>
+      <div class="db-badge db-trading">⬡ signal_deliveries</div>
+    </div>
+
+    <div class="svc-box" id="box-execute">
+      <span class="step-badge" id="step-execute">STEP 7</span>
+      <div class="svc-title">Paper Execute (SYSTEM_BOT)</div>
+      <div class="svc-file">trading_api.py → POST /api/v1/positions/execute</div>
+      <div class="svc-desc">
+        SYSTEM_BOT auto-executes BUY. Atomic transaction: updates <code>paper_capital</code>, upserts <code>paper_portfolio</code>, appends <code>paper_trade_log</code>.
+      </div>
+      <span class="tag tag-trading">ATOMIC</span>
+      <div class="db-badge db-trading">⬡ paper_trade_log</div>
+    </div>
+
+    <div class="svc-box" id="box-monitor">
+      <div class="svc-title">Execution Monitor</div>
+      <div class="svc-file">modules/execution_monitor.py</div>
+      <div class="svc-desc">
+        Every 30s during market hours. OBI + TIR + VWAP microprice. Hard stop / trailing stop / take-profit state machine.
+        <br>LTP via engine REST → <code>/api/v1/market-watch/{symbol}/ltp</code>
+      </div>
+      <span class="tag tag-trading">GUARD</span>
+      <span class="tag tag-rest">← :8766</span>
+    </div>
+
+    <div class="svc-box" id="box-briefing">
+      <div class="svc-title">Morning Briefing</div>
+      <div class="svc-file">modules/briefing.py · modules/notifier.py</div>
+      <div class="svc-desc">Sends capital + open positions summary to all approved users via Telegram DM at 10:30 AM NST.</div>
+      <span class="tag tag-trading">BRIEF</span>
+    </div>
+
+    <div class="svc-box" id="box-register">
+      <div class="svc-title">Register / Credentials UI</div>
+      <div class="svc-file">register_api.py :8768</div>
+      <div class="svc-desc">User registration (PENDING → APPROVED), PIN login, Meroshare + broker credential storage (Fernet encrypted).</div>
+      <span class="tag tag-trading">WEB</span>
+      <div class="db-badge db-trading">⬡ users · user_meroshare · user_broker</div>
+    </div>
+  </div>
+
+  <!-- COL 5: USERS -->
+  <div class="col-users" style="padding-left:12px">
+    <div class="col-header">DELIVERY</div>
+
+    <div class="user-card" id="card-telegram">
+      <div class="user-icon">📱</div>
+      <div class="user-name">Telegram Bot</div>
+      <div class="user-meta">modules/telegram_bot.py<br>DM to each approved user<br>with broker links footer</div>
+    </div>
+
+    <div class="user-card" id="card-discord">
+      <div class="user-icon">🎮</div>
+      <div class="user-name">Discord Bot</div>
+      <div class="user-meta">modules/discord_bot.py<br>DM via Discord API<br>slash commands for /buy /sell</div>
+    </div>
+
+    <div class="user-card" id="card-sysbot">
+      <div class="user-icon">🤖</div>
+      <div class="user-name">SYSTEM_BOT</div>
+      <div class="user-meta">paper_capital + portfolio<br>Auto-executes BUY signals<br>PAPER_MODE=true</div>
+    </div>
+
+    <div style="margin-top:16px">
+      <div class="svc-box" id="box-auditor" style="padding:10px 12px">
+        <div class="svc-title" style="font-size:10px">Auditor Loop</div>
+        <div class="svc-file">analysis/auditor.py</div>
+        <div class="svc-desc">EOD: reads paper trades via trading REST, writes trade_journal + updates financials KPIs.</div>
+        <span class="tag tag-rest">REST</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TIMELINE -->
+<div class="timeline">
+  <div class="timeline-title">Daily Schedule — Nepal Standard Time (UTC+5:45)</div>
+  <div class="timeline-track">
+    <div class="tl-bg"></div>
+    <div class="tl-block" style="left:12%;width:8%;background:var(--data-color);"></div>
+    <div class="tl-block" style="left:20%;width:40%;background:var(--engine-color);"></div>
+    <div class="tl-block" style="left:60%;width:12%;background:var(--trading-color);"></div>
+
+    <div class="tl-event" style="left:5%">
+      <div class="tl-dot" style="border-color:var(--data-color)"></div>
+      <div class="tl-time" style="color:var(--data-color)">10:20</div>
+      <div class="tl-label">Machine<br>Wakes</div>
+    </div>
+    <div class="tl-event" style="left:15%">
+      <div class="tl-dot" style="border-color:var(--engine-color)"></div>
+      <div class="tl-time" style="color:var(--engine-color)">10:30</div>
+      <div class="tl-label">Morning<br>Workflow</div>
+    </div>
+    <div class="tl-event" style="left:22%">
+      <div class="tl-dot" style="border-color:var(--engine-color)"></div>
+      <div class="tl-time" style="color:var(--engine-color)">10:45</div>
+      <div class="tl-label">Trading<br>Loop</div>
+    </div>
+    <div class="tl-event" style="left:60%">
+      <div class="tl-dot" style="border-color:var(--rest-color)"></div>
+      <div class="tl-time" style="color:var(--rest-color)">15:00</div>
+      <div class="tl-label">Market<br>Closes</div>
+    </div>
+    <div class="tl-event" style="left:68%">
+      <div class="tl-dot" style="border-color:var(--trading-color)"></div>
+      <div class="tl-time" style="color:var(--trading-color)">15:15</div>
+      <div class="tl-label">EOD<br>Workflow</div>
+    </div>
+    <div class="tl-event" style="left:78%">
+      <div class="tl-dot" style="border-color:var(--text-muted)"></div>
+      <div class="tl-time" style="color:var(--text-muted)">15:45</div>
+      <div class="tl-label">Machine<br>Sleeps</div>
+    </div>
+    <div class="tl-event" style="left:92%">
+      <div class="tl-dot" style="border-color:var(--signal-color)"></div>
+      <div class="tl-time" style="color:var(--signal-color)">Sun</div>
+      <div class="tl-label">Weekly<br>Review</div>
+    </div>
+  </div>
+</div>
+
+<!-- CONTROLS -->
+<div class="controls">
+  <button class="btn primary" onclick="startDemo()">▶ SIMULATE SIGNAL</button>
+  <button class="btn" onclick="stepDemo()">STEP →</button>
+  <button class="btn" onclick="autoPlay()">AUTO PLAY</button>
+  <button class="btn danger" onclick="resetDemo()">↺ RESET</button>
+  <div class="step-log" id="stepLog">Ready. Press SIMULATE SIGNAL to walk through a BUY signal production.</div>
+  <div class="step-counter" id="stepCounter">0 / 8</div>
+</div>
+
+<script>
+// ── NST CLOCK ──────────────────────────────────────────────────────────────
+function updateClock() {
+  const now = new Date();
+  const nst = new Date(now.getTime() + (5*60 + 45) * 60000);
+  const h = String(nst.getUTCHours()).padStart(2,'0');
+  const m = String(nst.getUTCMinutes()).padStart(2,'0');
+  const s = String(nst.getUTCSeconds()).padStart(2,'0');
+  document.getElementById('clock').textContent = `${h}:${m}:${s} NST`;
+
+  // Market hours: 10:45–15:00 NST
+  const totalMin = nst.getUTCHours()*60 + nst.getUTCMinutes();
+  const isOpen = totalMin >= 10*60+45 && totalMin < 15*60;
+  const dot = document.getElementById('marketDot');
+  const ms  = document.getElementById('marketStatus');
+  dot.style.background = isOpen ? 'var(--success)' : 'var(--text-muted)';
+  dot.style.boxShadow  = isOpen ? '0 0 8px var(--success)' : 'none';
+  ms.textContent = isOpen ? 'MARKET OPEN' : 'MARKET CLOSED';
+}
+updateClock();
+setInterval(updateClock, 1000);
+
+// ── PARTICLE CANVAS (ambient floating dots) ────────────────────────────────
+const canvas = document.getElementById('particle-canvas');
+const ctx = canvas.getContext('2d');
+let particles = [];
+
+function resizeCanvas() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+for (let i = 0; i < 40; i++) {
+  particles.push({
+    x: Math.random() * window.innerWidth,
+    y: Math.random() * window.innerHeight,
+    r: Math.random() * 1.5 + .3,
+    dx: (Math.random() - .5) * .4,
+    dy: (Math.random() - .5) * .4,
+    alpha: Math.random() * .3 + .05,
+    color: ['#3b82f6','#10b981','#f59e0b','#a855f7'][Math.floor(Math.random()*4)]
+  });
+}
+
+function animateParticles() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  particles.forEach(p => {
+    p.x += p.dx; p.y += p.dy;
+    if (p.x < 0) p.x = canvas.width;
+    if (p.x > canvas.width) p.x = 0;
+    if (p.y < 0) p.y = canvas.height;
+    if (p.y > canvas.height) p.y = 0;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = p.alpha;
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  requestAnimationFrame(animateParticles);
+}
+animateParticles();
+
+// ── DEMO STEPS ─────────────────────────────────────────────────────────────
+const STEPS = [
+  {
+    id: 'step-1',
+    boxes: [['box-atrad','data'],['box-history','data'],['box-indicators','data']],
+    log: '⏱  10:45 AM NST — Trading loop fires. atrad_scraper fetches live market watch. price_history + indicators loaded from DB.',
+    badge: { 'step-atrad': 'STEP 1' },
+    rest: false
+  },
+  {
+    id: 'step-2',
+    boxes: [['box-filter','engine']],
+    log: '🔍 filter_common._load_context() → GET /api/v1/positions/summary on trading service. Returns open_count + slots_remaining.',
+    badge: { 'step-filter': 'STEP 2' },
+    rest: true
+  },
+  {
+    id: 'step-3',
+    boxes: [['box-filter','engine']],
+    log: '📊 Filter pipeline runs: volume ≥1.5× avg ✓ · RSI 30–70 ✓ · MACD confluence ✓ · BB position ✓ · sector concentration ✓ → 3 qualifying symbols.',
+    badge: { 'step-filter': 'STEP 3' },
+    rest: false
+  },
+  {
+    id: 'step-4',
+    boxes: [['box-ai','engine']],
+    log: '🤖 Gemini pre-screens 3 symbols → 2 flagged for deep analysis. Claude analyzes NLIC: 40+ factors + 12 active lessons → BUY @ 1240 SL:1190 TP:1340',
+    badge: { 'step-ai': 'STEP 4' },
+    rest: false,
+    burst: { sym: 'NLIC @ 1240  SL:1190  TP:1340  Conf:0.73' }
+  },
+  {
+    id: 'step-5',
+    boxes: [['box-notifier','engine']],
+    log: '📡 notifier.send_buy_signal() → trading_client.push_signal() → POST http://localhost:8767/api/v1/webhook/signal',
+    badge: { 'step-notifier': 'STEP 5' },
+    rest: true
+  },
+  {
+    id: 'step-6',
+    boxes: [['box-webhook','trading']],
+    log: '✅ trading_api receives signal. Dedup check (UNIQUE signal_deliveries) → new. Fetches 2 approved users + their broker_links in one bulk query.',
+    badge: { 'step-webhook': 'STEP 6' },
+    rest: false
+  },
+  {
+    id: 'step-7',
+    boxes: [['card-telegram','signal'],['card-discord','signal'],['card-sysbot','trading']],
+    log: '📬 Async fan-out: Telegram DM ✓  Discord DM ✓  SYSTEM_BOT execute triggered.',
+    badge: { 'step-webhook': 'FAN-OUT' },
+    rest: false
+  },
+  {
+    id: 'step-8',
+    boxes: [['box-execute','trading']],
+    log: '💰 SYSTEM_BOT: POST /api/v1/positions/execute — atomic: paper_capital updated · paper_portfolio UPSERTED · paper_trade_log appended. Position open.',
+    badge: { 'step-execute': 'STEP 8' },
+    rest: false
+  }
+];
+
+let currentStep = -1;
+let autoTimer = null;
+
+function clearAllActive() {
+  document.querySelectorAll('.svc-box, .user-card').forEach(el => {
+    el.className = el.className.replace(/\s+active-\w+/g, '');
+  });
+  document.querySelectorAll('.step-badge').forEach(el => el.style.opacity = '0');
+  document.getElementById('restPipe').classList.remove('flowing');
+}
+
+function applyStep(s) {
+  clearAllActive();
+  s.boxes.forEach(([id, type]) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('active-' + type);
+  });
+  if (s.badge) {
+    Object.entries(s.badge).forEach(([id, label]) => {
+      const el = document.getElementById(id);
+      if (el) { el.textContent = label; el.style.opacity = '1'; }
+    });
+  }
+  if (s.rest) document.getElementById('restPipe').classList.add('flowing');
+  if (s.burst) showBurst(s.burst.sym);
+  document.getElementById('stepLog').textContent = s.log;
+  document.getElementById('stepCounter').textContent = `${currentStep+1} / ${STEPS.length}`;
+}
+
+function showBurst(sym) {
+  const b = document.getElementById('signalBurst');
+  document.getElementById('burstSym').textContent = sym;
+  b.classList.remove('show');
+  void b.offsetWidth;
+  b.classList.add('show');
+  setTimeout(() => b.classList.remove('show'), 800);
+}
+
+function startDemo() {
+  currentStep = 0;
+  applyStep(STEPS[0]);
+}
+
+function stepDemo() {
+  if (currentStep < 0) currentStep = 0;
+  else currentStep = (currentStep + 1) % STEPS.length;
+  applyStep(STEPS[currentStep]);
+}
+
+function autoPlay() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; return; }
+  currentStep = 0;
+  applyStep(STEPS[0]);
+  autoTimer = setInterval(() => {
+    currentStep++;
+    if (currentStep >= STEPS.length) {
+      clearInterval(autoTimer); autoTimer = null;
+      resetDemo(); return;
+    }
+    applyStep(STEPS[currentStep]);
+  }, 2200);
+}
+
+function resetDemo() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  clearAllActive();
+  currentStep = -1;
+  document.getElementById('stepLog').textContent = 'Ready. Press SIMULATE SIGNAL to walk through a BUY signal production.';
+  document.getElementById('stepCounter').textContent = `0 / ${STEPS.length}`;
+}
+</script>
+</body>
+</html>

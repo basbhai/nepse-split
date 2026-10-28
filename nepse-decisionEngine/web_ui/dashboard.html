@@ -4324,6 +4324,7 @@
       <td>${v(r.exit_date)}</td>
       <td>${resultBadge(r.result)}</td>
       <td><span class="${pnlClass(r.return_pct)}">${v(r.return_pct)}${r.return_pct && r.return_pct !== '—' ? '%' : ''}</span></td>
+      <td><span class="${pnlClass(r.pnl_pct)}">${v(r.pnl_pct)}${r.pnl_pct && r.pnl_pct !== '—' ? '%' : ''}</span></td>
       <td><span class="${pnlClass(r.pnl_npr)}">${v(r.pnl_npr)}</span></td>
       <td>${v(r.hold_days_actual)}</td>
       <td style="color:var(--muted);max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${v(r.primary_signal)}</td>
@@ -4338,7 +4339,7 @@
       <canvas id="chart-cumret" height="65"></canvas>
     </div>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Symbol</th><th>Sector</th><th>Entry</th><th>Exit</th><th>Result</th><th>Ret%</th><th>PnL NPR</th><th>Days</th><th>Signal</th><th>Loss Cause</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Sector</th><th>Entry</th><th>Exit</th><th>Result</th><th>Ret%</th><th>Net%</th><th>PnL NPR</th><th>Days</th><th>Signal</th><th>Loss Cause</th></tr></thead>
       <tbody>${trs}</tbody>
     </table></div>`;
 

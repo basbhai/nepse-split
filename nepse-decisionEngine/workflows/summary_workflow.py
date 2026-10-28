@@ -124,11 +124,26 @@ def run(dry_run: bool = False, skip_guard: bool = False) -> int:
     # checks), not by our own mode flag — skipping this step on a day with a
     # real sale would leave those shares undelivered past T+2.
     def _auto_edis():
-        from modules.meroshare import run_edis
+        from modules.meroshare import run_edis, close_from_edis
         res = run_edis(dry_run=False)
+        close_from_edis(res, dry_run=False)
         if not res.get("ok"):
             raise RuntimeError(res.get("note") or "EDIS reported failure")
     results["auto_edis"] = _step("auto_edis (deliver sold shares)", _auto_edis, dry_run)
+
+    # ── Step 0b: Live portfolio sync (unconditional — 2026-09-24) ─────────────
+    # Pulls the real DEMAT balance (waccReport + myPortfolio) into `portfolio`.
+    # Stamps demat_confirmed_date the first evening a bought scrip shows up in
+    # Meroshare — the ONLY thing that releases a live position to
+    # execution_monitor (T+3 alone is not enough; Meroshare can lag it). Also
+    # closes rows for shares sold today. Runs after auto-EDIS so today's sells
+    # are delivered first. Unconditional for the same reason as EDIS: PAPER_MODE
+    # no longer says whether the real book changed today.
+    def _live_portfolio_sync():
+        from modules.meroshare import sync
+        if sync() is None:
+            raise RuntimeError("meroshare.sync() returned no data")
+    results["live_portfolio_sync"] = _step("live_portfolio_sync (Meroshare → portfolio)", _live_portfolio_sync, dry_run)
 
     # ── Step 1: NEPSE indices ─────────────────────────────────────────────────
     def _nepse_indices():
@@ -228,6 +243,15 @@ def run(dry_run: bool = False, skip_guard: bool = False) -> int:
         run_summarizer()
     results["summarizer"] = _step("daily_context_summarizer", _summarizer, dry_run)
 
+    # ── Step 11b: Daily system check → findings_log ──────────────────────────
+    # Plain SQL checks always run. The `claude -p` agent layer (web search) runs
+    # only when DAILY_CHECK_LLM=true.
+    def _daily_check():
+        from analysis.daily_check import run as run_daily
+        from sheets import get_setting as _g
+        run_daily(llm=_g("DAILY_CHECK_LLM", "false").strip().lower() == "true", apply=True, echo=False)
+    results["daily_check"] = _step("daily_check (findings log; agent layer only if DAILY_CHECK_LLM=true)", _daily_check, dry_run)
+
     # ── Step 12: Backup sync ──────────────────────────────────────────────────
     def _backup():
         from modules.backup_sync import run as run_backup
@@ -236,15 +260,29 @@ def run(dry_run: bool = False, skip_guard: bool = False) -> int:
 
     # ── Step 13: Local PostgreSQL backup ──────────────────────────────────────
     def _pg_backup():
-        import subprocess, os
+        import subprocess, os, shutil
         backup_dir = os.path.expanduser("~/nepse-backup")
-        subprocess.run(
-            f"pg_dump postgresql://postgres:nepse123@127.0.0.1:5432/nepse_engine "
-            f"--schema-only -f {backup_dir}/schema.sql && "
-            f"pg_dump postgresql://postgres:nepse123@127.0.0.1:5432/nepse_engine "
-            f"-f {backup_dir}/full.sql",
-            shell=True, check=True
-        )
+        prev_dir = f"{backup_dir}/yesterday"
+        url = "postgresql://postgres:nepse123@127.0.0.1:5432/nepse_engine"
+        # dump to .new first so a failed dump never destroys the good backup
+        try:
+            subprocess.run(
+                f"pg_dump {url} --schema-only -f {backup_dir}/schema.sql.new && "
+                f"pg_dump {url} -f {backup_dir}/full.sql.new",
+                shell=True, check=True
+            )
+        except Exception:
+            for f in ("schema.sql.new", "full.sql.new"):
+                if os.path.exists(f"{backup_dir}/{f}"):
+                    os.remove(f"{backup_dir}/{f}")
+            raise
+        # rotate: drop old yesterday, today's current -> yesterday, new -> current
+        shutil.rmtree(prev_dir, ignore_errors=True)
+        os.makedirs(prev_dir)
+        for f in ("schema.sql", "full.sql"):
+            if os.path.exists(f"{backup_dir}/{f}"):
+                shutil.move(f"{backup_dir}/{f}", f"{prev_dir}/{f}")
+            os.rename(f"{backup_dir}/{f}.new", f"{backup_dir}/{f}")
     results["pg_backup"] = _step("pg_backup (schema + full → ~/nepse-backup)", _pg_backup, dry_run)
 
     # ── Summary log ───────────────────────────────────────────────────────────

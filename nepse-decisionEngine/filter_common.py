@@ -24,6 +24,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Optional
 import json
+from clients.trading_client import fetch_positions_summary
 from config import NST
 
 logger = logging.getLogger(__name__)
@@ -345,23 +346,13 @@ def _load_context() -> dict:
             ctx["max_positions"] = 3
 
         try:
-            from sheets import run_raw_sql as _run_raw_sql
-            _pos_rows = _run_raw_sql(
-                """
-                SELECT pp.symbol, ss.sectorname AS sector
-                FROM paper_portfolio pp
-                LEFT JOIN share_sectors ss ON ss.symbol = pp.symbol
-                WHERE pp.status = 'OPEN' AND pp.test_mode = 'false'
-                """
-            )
-            _sec_counts: dict[str, int] = {}
-            for _p in (_pos_rows or []):
-                _sec = str(_p.get("sector", "") or "").lower().strip()
-                if _sec:
-                    _sec_counts[_sec] = _sec_counts.get(_sec, 0) + 1
-            ctx["sector_position_counts"] = _sec_counts
-        except Exception:
+            _summary = fetch_positions_summary()
+            ctx["sector_position_counts"] = _summary.get("sector_counts", {})
+        except Exception as _tse:
+            # trading service unreachable — disable sector gate and lock positions (fail closed)
+            logger.warning("fetch_positions_summary failed (%s) — sector gate disabled, positions locked", _tse)
             ctx["sector_position_counts"] = {}
+            ctx["max_positions"] = 0
 
         try:
             ctx["max_positions_per_sector"] = int(get_setting("MAX_POSITIONS_PER_SECTOR", "2"))

@@ -42,6 +42,7 @@ from typing import List, Optional
 
 import requests
 
+from clients.trading_client import push_signal, TradingServiceError
 from config import NST
 
 logger = logging.getLogger(__name__)
@@ -529,9 +530,6 @@ def send_buy_signal(result) -> bool:
     if result.action != "BUY":
         return False
 
-    from datetime import datetime
-    from clients.trading_client import push_signal, TradingServiceError
-
     signal_date = datetime.now(tz=NST).strftime("%Y-%m-%d")
     try:
         resp = push_signal(
@@ -543,24 +541,53 @@ def send_buy_signal(result) -> bool:
             entry_price    = float(getattr(result, "entry_price", 0) or 0),
             primary_signal = getattr(result, "primary_signal", "") or "",
             suggested_hold = getattr(result, "suggested_hold", 10) or 10,
+            stop_loss      = float(getattr(result, "stop_loss", 0) or 0),
+            target         = float(getattr(result, "target", 0) or 0),
+            reasoning      = getattr(result, "reasoning", "") or "",
+            sector         = getattr(result, "sector", "") or "",
+            risk_reward    = float(getattr(result, "risk_reward", 0) or 0),
+            allocation_npr = float(getattr(result, "allocation_npr", 0) or 0),
+            shares         = int(getattr(result, "shares", 0) or 0),
+            breakeven      = float(getattr(result, "breakeven", 0) or 0),
+            wait_condition = getattr(result, "wait_condition", "") or "",
+            lesson_applied = getattr(result, "lesson_applied", "") or "",
         )
-        logger.info("BUY signal pushed to trading: %s → delivered=%s skipped=%s",
-                    result.symbol, resp.get("delivered", "?"), resp.get("skipped", "?"))
+        logger.info("BUY signal pushed to trading: %s → delivered=%s sent_ok=%s",
+                    result.symbol, resp.get("delivered", "?"), resp.get("sent_ok", "?"))
         return True
     except TradingServiceError as e:
-        logger.error("push_signal failed for %s: %s — trading service may be down", result.symbol, e)
+        logger.error("push_signal BUY failed for %s: %s — trading service may be down", result.symbol, e)
         return False
 
 
 def send_wait_signal(result) -> bool:
     """
-    Send a WAIT signal to admin only.
-    result: AnalystResult from claude_analyst.py
+    Push WAIT signal to trading service — fans out to all approved users.
+    Falls back to admin-only if the trading service is unreachable.
     """
     if result.action != "WAIT":
         return False
-    message = _format_wait_signal(result)
-    return _send_admin_only(message, parse_mode="Markdown")
+
+    signal_date = datetime.now(tz=NST).strftime("%Y-%m-%d")
+    try:
+        resp = push_signal(
+            symbol         = result.symbol,
+            signal_date    = signal_date,
+            action         = "WAIT",
+            confidence     = getattr(result, "confidence", 0) or 0,
+            entry_price    = float(getattr(result, "entry_price", 0) or 0),
+            primary_signal = getattr(result, "primary_signal", "") or "",
+            reasoning      = getattr(result, "reasoning", "") or "",
+            wait_condition = getattr(result, "wait_condition", "") or "",
+            sector         = getattr(result, "sector", "") or "",
+        )
+        logger.info("WAIT signal pushed to trading: %s → delivered=%s sent_ok=%s",
+                    result.symbol, resp.get("delivered", "?"), resp.get("sent_ok", "?"))
+        return True
+    except TradingServiceError as e:
+        logger.warning("push_signal WAIT failed for %s: %s — falling back to admin", result.symbol, e)
+        message = _format_wait_signal(result)
+        return _send_admin_only(message, parse_mode="Markdown")
 
 
 def send_avoid_signal(result, verbose: bool = False) -> bool:

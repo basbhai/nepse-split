@@ -530,7 +530,14 @@ async def cmd_buy(interaction: discord.Interaction, symbol: str, shares: int, pr
             return
 
         sym = symbol.upper()
-        matches = lookup_symbols(sym)
+        try:
+            matches = lookup_symbols(sym)
+        except ValueError:
+            await interaction.followup.send(
+                "❌ Symbol lookup unavailable — engine is down. Try again shortly.",
+                ephemeral=True,
+            )
+            return
         if not matches:
             await interaction.followup.send(
                 f"❌ Symbol **{sym}** not found in NEPSE.",
@@ -716,7 +723,14 @@ async def cmd_sell(interaction: discord.Interaction, symbol: str, shares: int, p
             return
 
         sym = symbol.upper()
-        matches = lookup_symbols(sym)
+        try:
+            matches = lookup_symbols(sym)
+        except ValueError:
+            await interaction.followup.send(
+                "❌ Symbol lookup unavailable — engine is down. Try again shortly.",
+                ephemeral=True,
+            )
+            return
         if not matches:
             await interaction.followup.send(
                 f"❌ Symbol **{sym}** not found in NEPSE.",

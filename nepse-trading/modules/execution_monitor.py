@@ -235,6 +235,10 @@ LIVE_EXIT_ESCALATE_AFTER = 4
 from db.connection import _db
 from sheets import get_setting, run_raw_sql, execute_dml
 
+# Fallback LTP cache — populated on each successful engine REST call so that
+# a transient engine outage during market hours doesn't blind the guard entirely.
+_ltp_cache: dict[str, dict] = {}
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 1 — TIME HELPERS
@@ -312,6 +316,7 @@ def _load_paper_positions() -> list[dict]:
     for row in rows:
         row["book"] = "paper"
         _enrich_from_market_log(row)     # rehydrate peak_price / trail_active
+        row["analyst_stop"] = _analyst_stop(row.get("symbol"), float(row.get("entry_price") or 0))
     return rows
 
 
@@ -333,13 +338,78 @@ def _load_live_positions() -> list[dict]:
     return rows
 
 
-def _load_open_positions() -> list[dict]:
+def _settlement_release_date(pos: dict):
+    """Date this position's shares become sellable, or None if not yet.
+
+    LIVE book: only once meroshare.sync() has seen the scrip in myPortfolio
+    (demat_confirmed_date). A sell order can't go through until the shares are
+    actually in Meroshare, and that can lag T+3 — so the day count is NOT a
+    release for live, it's only paper's rule.
+    PAPER book (no real demat): T+SETTLEMENT_TRADING_DAYS trading days."""
+    from datetime import date as _date, timedelta as _td
+    if pos.get("book") == "live":
+        demat = pos.get("demat_confirmed_date")
+        if not demat:
+            return None
+        try:
+            return _date.fromisoformat(str(demat)[:10])
+        except ValueError:
+            return None
+    from calendar_guard import is_trading_day
+    entry = pos.get("first_buy_date") or pos.get("entry_date")
+    if not entry:
+        return _date.min          # no date on record — don't block a paper row
+    try:
+        d, n = _date.fromisoformat(str(entry)[:10]), 0
+    except ValueError:
+        return _date.min
+    while n < SETTLEMENT_TRADING_DAYS:
+        d += _td(days=1)
+        if is_trading_day(d):
+            n += 1
+    return d
+
+
+def _is_sellable(pos: dict) -> bool:
+    """True once shares can actually be sold (live: in Meroshare; paper: T+3)."""
+    from calendar_guard import today_nst
+    rel = _settlement_release_date(pos)
+    return rel is not None and rel <= today_nst()
+
+
+def _analyst_stop(symbol: str, entry: float) -> float:
+    """Claude analyst's stop_loss from the position's PENDING market_log row, or 0.
+
+    Only a stop strictly below entry is usable — anything else (missing, 0, at/above
+    entry) returns 0 so the guard falls back to HARD_STOP_PCT instead of firing at once.
+    """
+    try:
+        from clients.engine_client import fetch_signals, EngineServiceError
+        try:
+            data = fetch_signals()
+        except EngineServiceError:
+            return 0.0
+        for s in (data.get("signals") or []):
+            if s.get("symbol") == symbol and s.get("outcome", "PENDING") == "PENDING":
+                stop = float(s.get("stop_loss") or 0)
+                return stop if 0 < stop < entry else 0.0
+    except Exception as e:
+        log.warning("analyst_stop(%s): %s", symbol, e)
+    return 0.0
+
+
+def _load_open_positions(sellable_only: bool = False) -> list[dict]:
     """
     Load every OPEN position from BOTH books in one list. Each row is tagged
     row["book"] = "paper" | "live". A guard trigger closes paper in the ledger;
     for live it places a real ATrad SELL when LIVE_AUTO_CLOSE_ENABLED is "true",
     otherwise alert-only (see _live_guard_close). The live book is skipped
     entirely if LIVE_MONITOR_ENABLED != "true".
+
+    sellable_only=True drops positions still inside settlement (see
+    _is_sellable) — the monitor loop uses it so a position is only watched, and
+    its peak only tracked, from the day it can actually be sold. The startup
+    pre-flight uses the unfiltered list so the service stays up to wait for it.
     """
     positions: list[dict] = []
     try:
@@ -351,6 +421,12 @@ def _load_open_positions() -> list[dict]:
             positions.extend(_load_live_positions())
         except Exception as e:
             log.error("load live positions failed: %s", e)
+    if sellable_only:
+        waiting = [p for p in positions if not _is_sellable(p)]
+        if waiting:
+            log.debug("Awaiting settlement (not monitored yet): %s",
+                      ", ".join(f'{p.get("book")}:{p.get("symbol")}' for p in waiting))
+        positions = [p for p in positions if _is_sellable(p)]
     return positions
 
 
@@ -456,31 +532,38 @@ def _catchup_peak_from_history(positions: list[dict]) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SECTION 3 — LTP & MARKET WATCH (DB read — no API call)
+# SECTION 3 — LTP & MARKET WATCH (engine REST fallback; live API is primary)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _get_ltp_from_db(symbol: str) -> Optional[dict]:
     """
-    Read latest row for symbol from atrad_market_watch.
-    Returns dict with ltp, vwap, vwap_dev, bid_price, bid_qty, ask_price, ask_qty,
-    low_dpr, high_dpr, dpr_proximity, or None if not found.
+    Fetch market-watch snapshot via engine REST (GET /api/v1/market-watch/{symbol}/ltp).
+    Falls back to in-process _ltp_cache on EngineServiceError — logs warning.
+    Returns None when no data is available at all.
     """
     try:
-        rows = run_raw_sql("""
-            SELECT ltp, vwap, vwap_dev, bid_price, bid_qty, ask_price, ask_qty,
-                   low_dpr, high_dpr, dpr_proximity, time
-            FROM atrad_market_watch
-            WHERE symbol = %s
-            ORDER BY id DESC LIMIT 1
-        """, (symbol,))
-        if not rows:
-            return None
-        r = rows[0]
-        return {k: float(v) if v not in (None, "", "None") else 0.0 for k, v in r.items()
-                if k != "time"} | {"time": r.get("time", "")}
-    except Exception as e:
-        log.error("get_ltp_from_db(%s): %s", symbol, e)
+        from clients.engine_client import fetch_ltp, EngineServiceError
+        data = fetch_ltp(symbol)
+        if data:
+            result = {
+                "ltp":           float(data.get("ltp") or 0),
+                "vwap":          float(data.get("vwap") or 0),
+                "vwap_dev":      float(data.get("vwap_dev") or 0),
+                "bid_price":     0.0,
+                "bid_qty":       0.0,
+                "ask_price":     0.0,
+                "ask_qty":       0.0,
+                "low_dpr":       float(data.get("low_dpr") or 0),
+                "high_dpr":      float(data.get("high_dpr") or 0),
+                "dpr_proximity": float(data.get("dpr_proximity") or 0),
+                "time":          data.get("time", ""),
+            }
+            _ltp_cache[symbol] = result
+            return result
         return None
+    except Exception as e:
+        log.warning("_get_ltp_from_db(%s): engine REST failed (%s) — using cache", symbol, e)
+        return _ltp_cache.get(symbol)
 
 
 def _ltp_age_seconds(time_str: str) -> Optional[float]:

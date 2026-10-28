@@ -358,6 +358,50 @@ SETTINGS_CLOSURE_COUNT = len(_SETTINGS_CLOSURES)
 # 6. FLAG AD-HOC CLOSURE — called by scraper / news / gemini
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _market_trading_evidence(d: date) -> int:
+    """
+    Count symbols with traded volume today, from a live read-only ATrad
+    market-watch pull (no DB write, no orders). Falls back to symbols whose
+    cumulative volume grew across today's atrad_market_watch snapshots.
+    Returns 0 on no data or any failure (fail-open: no evidence).
+    """
+    try:
+        import pandas as pd  # noqa: PLC0415
+        from modules.atrad_scraper import fetch_market_watch  # noqa: PLC0415
+        df = fetch_market_watch(write_db=False)
+        if df is not None and len(df):
+            vol = pd.to_numeric(
+                df["volume"].astype(str).str.replace(",", ""), errors="coerce"
+            )
+            return int((vol > 0).sum())
+    except Exception as exc:
+        logger.warning("_market_trading_evidence: live pull failed — %s", exc)
+    try:
+        from db.connection import _db  # noqa: PLC0415
+        with _db() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS n FROM (
+                    SELECT symbol
+                    FROM atrad_market_watch
+                    WHERE date = %s
+                    GROUP BY symbol
+                    HAVING MAX(NULLIF(REPLACE(volume, ',', ''), '')::numeric)
+                         > MIN(NULLIF(REPLACE(volume, ',', ''), '')::numeric)
+                ) t
+                """,
+                (d.isoformat(),),
+            )
+            row = cur.fetchone()
+        return int(row["n"] if isinstance(row, dict) else row[0])
+    except Exception as exc:
+        logger.warning("_market_trading_evidence: db fallback failed — %s", exc)
+        return 0
+
+
+MIN_TRADING_EVIDENCE_SYMBOLS = 10
+
+
 def flag_adhoc_closure(
     closure_date: date,
     reason: str,
@@ -385,6 +429,17 @@ def flag_adhoc_closure(
     except ImportError:
         logger.error("flag_adhoc_closure: sheets.py not importable")
         return False
+
+    # Guard: a news-derived closure must not override live trading data.
+    if closure_date == today_nst():
+        n = _market_trading_evidence(closure_date)
+        if n >= MIN_TRADING_EVIDENCE_SYMBOLS:
+            logger.warning(
+                "flag_adhoc_closure: REFUSED %s [src:%s] — market is trading "
+                "(%d symbols with traded volume today)",
+                closure_date, source, n,
+            )
+            return False
 
     try:
         new_entry  = f"{closure_date.isoformat()}:{reason} [src:{source}]"

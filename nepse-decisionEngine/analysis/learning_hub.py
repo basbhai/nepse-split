@@ -42,6 +42,7 @@ from zoneinfo import ZoneInfo
 from AI import ask_deepseek_review
 
 from sheets import run_raw_sql, upsert_row, update_row, write_row, get_setting
+from analysis.lesson_quality import check as quality_gate, annotate as annotate_lesson, load_active
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
@@ -371,7 +372,15 @@ def _load_nrb_macro() -> dict | None:
             LIMIT 1
             """
         )
-        return rows[0] if rows else None
+        row = rows[0] if rows else None
+        # Newest months often lack the rate fields (NRB publishes them separately):
+        # carry the last published value forward rather than showing None.
+        for k in ("policy_rate", "bank_rate", "crr_percentage", "slr_percentage"):
+            if row and row.get(k) is None:
+                last = run_raw_sql(f"SELECT {k} FROM nrb_monthly WHERE {k} IS NOT NULL "
+                                   "ORDER BY id DESC LIMIT 1")
+                row[k] = last[0][k] if last else None
+        return row
     except Exception as e:
         log.warning("nrb_monthly load failed: %s", e)
         return None
@@ -497,14 +506,16 @@ def _load_claude_audit_history() -> list[dict]:
 
 
 def _check_review_already_done(review_week: str) -> bool:
-    """Check if a review for this week already produced lessons."""
+    """Check if a review already ran this week. Lessons alone miss zero-lesson runs;
+    claude_audit is upserted by every completed run."""
     try:
         rows = run_raw_sql(
             """
-            SELECT COUNT(*) as cnt FROM learning_hub
-            WHERE review_week = %s AND source = 'gpt_weekly'
+            SELECT (SELECT COUNT(*) FROM learning_hub
+                    WHERE review_week = %s AND source = 'gpt_weekly')
+                 + (SELECT COUNT(*) FROM claude_audit WHERE review_week = %s) AS cnt
             """,
-            (review_week,),
+            (review_week, review_week),
         )
         cnt = int(rows[0].get("cnt", 0)) if rows else 0
         return cnt > 0
@@ -815,6 +826,15 @@ ANTI-OVERFITTING RULES  -  ENFORCE STRICTLY:
     (e.g. extending a banking/finance lending-rate lesson to cover microfinance or
     cooperatives) — check whether the new sector should inherit the same threshold
     as its siblings before picking an independent one.  
+
+QUALITY RULES  -  code rejects any new lesson that breaks these, so do not write it:
+Q1. INDEPENDENT EVENTS: count separate days/situations, not trade rows. Several stocks bought or
+    blocked in the same week or on the same market move = ONE event. Need at least 8.
+    Report the number in "independent_events".
+Q2. BASELINE: say what would have happened anyway and show the lesson beats it. Example: if the
+    market fell, compare against the win/correct rate of ALL similar decisions in the same period,
+    not against zero. If the lesson does not clearly beat the baseline, write nothing.
+    Put this comparison (one sentence with numbers) in "baseline_comparison".
 
 GATE PROPOSAL RULES:
 - Only propose threshold changes if gate_misses sample >= 20 for that category

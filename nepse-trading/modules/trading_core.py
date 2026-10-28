@@ -29,8 +29,8 @@ log = logging.getLogger(__name__)
 NST              = ZoneInfo("Asia/Kathmandu")
 STARTING_CAPITAL = Decimal("100000.00")
 MAX_POSITIONS    = 15
-CGT_RATE_LONG    = Decimal("0.075")    # 7.5% on profit, held > 365 days
-CGT_RATE_SHORT   = Decimal("0.10")     # 10% on profit, held <= 365 days
+CGT_RATE_LONG    = Decimal("0.035")    # 3.5% on profit, held > 365 days (cut from 7.5% by Cabinet 2026-09-15 relief package)
+CGT_RATE_SHORT   = Decimal("0.05")     # 5% on profit, held <= 365 days (cut from 10% by Cabinet 2026-09-15 relief package)
 SEBON_PCT        = Decimal("0.00015")  # 0.015%
 DP_FEE           = Decimal("25")       # flat per trade
 
@@ -259,10 +259,27 @@ def register_user(telegram_id: int, username: str, full_name: str) -> str:
             VALUES (%s, %s, %s, 'PENDING', %s, NULL, NULL)
             ON CONFLICT (telegram_id) DO NOTHING
         """, (str(telegram_id), username or "", full_name or "", now))
+        # Write to canonical users + user_channels tables (idempotent — UNIQUE on channel)
+        cur.execute(
+            "SELECT user_id FROM user_channels WHERE platform='telegram' AND platform_user_id=%s",
+            (str(telegram_id),)
+        )
+        if not cur.fetchone():
+            cur.execute(
+                "INSERT INTO users (full_name, status, created_at) VALUES (%s, 'PENDING', %s) RETURNING id",
+                (full_name or username or str(telegram_id), now),
+            )
+            user_id = str(cur.fetchone()["id"])
+            cur.execute("""
+                INSERT INTO user_channels
+                    (user_id, platform, platform_user_id, username, is_primary, linked_at)
+                VALUES (%s, 'telegram', %s, %s, 'true', %s)
+                ON CONFLICT (platform, platform_user_id) DO NOTHING
+            """, (user_id, str(telegram_id), username or "", now))
     return "registered"
 
 def approve_user(telegram_id: int, approved_by: int) -> bool:
-    """Approve a PENDING user and seed their capital row. Returns True if done."""
+    """Approve a PENDING user, seed their capital row, and create signal preferences."""
     user = get_user(telegram_id)
     if not user:
         return False
@@ -273,6 +290,26 @@ def approve_user(telegram_id: int, approved_by: int) -> bool:
             SET status = 'APPROVED', approved_at = %s, approved_by = %s
             WHERE telegram_id = %s
         """, (now, str(approved_by), str(telegram_id)))
+        # Sync approval to canonical users table and create default signal preferences
+        cur.execute(
+            "SELECT user_id FROM user_channels WHERE platform='telegram' AND platform_user_id=%s",
+            (str(telegram_id),)
+        )
+        ch = cur.fetchone()
+        if ch:
+            uid = ch["user_id"]
+            cur.execute(
+                "UPDATE users SET status='APPROVED', approved_at=%s, approved_by=%s WHERE id=%s",
+                (now, str(approved_by), uid),
+            )
+            cur.execute("""
+                INSERT INTO user_signal_preferences
+                    (user_id, notify_telegram, notify_discord, auto_execute, created_at, updated_at)
+                VALUES (%s, 'true', 'false', 'false', %s, %s)
+                ON CONFLICT (user_id) DO NOTHING
+            """, (uid, now, now))
+        else:
+            log.warning("approve_user(%s): no user_channels row — users/prefs sync skipped", telegram_id)
     _seed_capital_row(telegram_id)
     return True
 
@@ -287,6 +324,23 @@ def deny_user(telegram_id: int) -> bool:
             WHERE telegram_id = %s
         """, (str(telegram_id),))
     return True
+
+
+def set_user_pin_hash(telegram_id: int, pin: str) -> bool:
+    """Set SHA-256 PIN hash for web login. Returns True if user found and updated."""
+    import hashlib
+    if not pin.isdigit() or not (4 <= len(pin) <= 8):
+        raise ValueError("PIN must be 4-8 digits")
+    pin_hash = hashlib.sha256(pin.encode()).hexdigest()
+    with _db() as cur:
+        cur.execute(
+            "UPDATE users SET pin_hash = %s WHERE id IN ("
+            "  SELECT CAST(user_id AS INTEGER) FROM user_channels "
+            "  WHERE platform='telegram' AND platform_user_id=%s"
+            ")",
+            (pin_hash, str(telegram_id))
+        )
+        return cur.rowcount > 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -328,32 +382,15 @@ def get_all_open_positions(telegram_id: int) -> list[dict]:
 
 def lookup_symbols(query: str) -> list[str]:
     """
-    Look up symbols in share_sectors.
-    Returns exact match as single-item list, or partial ILIKE matches (up to 8).
-    Returns [query.upper()] as fallback if share_sectors table is empty —
-    symbol validation is best-effort, not a hard gate.
+    Look up symbols via engine REST (GET /api/v1/symbols/validate?q=...).
+    Returns exact match first, then partial matches up to 8.
+    Raises ValueError on engine unavailability — never passes raw input to SQL.
     """
     try:
-        exact = run_raw_sql(
-            "SELECT symbol FROM share_sectors WHERE UPPER(symbol) = UPPER(%s)",
-            (query,),
-        )
-        if exact:
-            return [r["symbol"] for r in exact]
-        partial = run_raw_sql(
-            "SELECT symbol FROM share_sectors WHERE UPPER(symbol) LIKE UPPER(%s) ORDER BY symbol LIMIT 8",
-            (f"%{query}%",),
-        )
-        if partial:
-            return [r["symbol"] for r in partial]
-        count = run_raw_sql("SELECT COUNT(*) AS cnt FROM share_sectors")
-        if count and int(count[0].get("cnt", 0)) == 0:
-            log.warning("share_sectors table is empty — skipping symbol validation for %s", query)
-            return [query.upper()]
-        return []
+        from clients.engine_client import fetch_symbol_lookup, EngineServiceError
+        return fetch_symbol_lookup(query)
     except Exception as e:
-        log.warning("lookup_symbols error for %s: %s — skipping validation", query, e)
-        return [query.upper()]
+        raise ValueError("symbol lookup unavailable") from e
 
 def _seed_capital_row(telegram_id: int):
     """Insert capital row for a newly approved user. Safe to call multiple times."""

@@ -72,8 +72,8 @@ ALPHA_NEAR_ZERO_BAND        =  1.5
 # ── Fee constants — must match trading_core.py exactly ───────────────────────
 SEBON_PCT      = 0.00015   # 0.015%
 DP_CHARGE      = 25.0      # flat per trade side
-CGT_RATE_LONG  = 0.075     # 7.5% on gross profit, held > 365 days
-CGT_RATE_SHORT = 0.10      # 10% on gross profit, held <= 365 days (FIX 4: was flat 0.075)
+CGT_RATE_LONG  = 0.035     # 3.5% on gross profit, held > 365 days (cut from 7.5% by Cabinet 2026-09-15 relief package)
+CGT_RATE_SHORT = 0.05      # 5% on gross profit, held <= 365 days (cut from 10% by Cabinet 2026-09-15 relief package)
 
 
 def _cgt_rate_for_hold(hold_days_count: int) -> float:
@@ -226,20 +226,21 @@ def _compute_pnl_npr(entry_price: float, exit_price: float, shares: float,
                       hold_days_count: int = 0) -> float:
     """
     Compute net P&L after all Nepal fees and CGT.
-    FIX 4: tiered brokerage + tiered CGT (7.5% >365d, 10% <=365d) —
-    matches trading_core.py calc_sell_fees() exactly.
+    FIX (2026-09-22): was also subtracting buy-side brokerage/SEBON/DP from
+    gross profit — but that fee was already a sunk cost paid at entry, not
+    a cost of this exit, so it double-charged every closed trade.
+    Sell-side fees + CGT only now, same as calc_sell_fees().
     """
-    buy_value  = entry_price * shares
-    sell_value = exit_price  * shares
-    gross      = sell_value - buy_value
+    buy_value    = entry_price * shares
+    sell_value   = exit_price  * shares
+    gross_profit = sell_value - buy_value
 
-    buy_cost   = _brokerage(buy_value)  + (buy_value  * SEBON_PCT) + DP_CHARGE
-    sell_cost  = _brokerage(sell_value) + (sell_value * SEBON_PCT) + DP_CHARGE
+    sell_cost = _brokerage(sell_value) + (sell_value * SEBON_PCT) + DP_CHARGE
 
     # CGT: tiered rate on gross profit only (never on a loss)
-    cgt = max(0.0, gross * _cgt_rate_for_hold(hold_days_count))
+    cgt = max(0.0, gross_profit * _cgt_rate_for_hold(hold_days_count))
 
-    return round(gross - buy_cost - sell_cost - cgt, 2)
+    return round(gross_profit - sell_cost - cgt, 2)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -306,6 +307,10 @@ def _write_trade_journal(position: dict, deltas: dict,
         pnl_npr     = _compute_pnl_npr(entry_price, exit_price, shares, hold_days_n)
         result      = _classify_result(return_pct, pnl_npr)
 
+        # Net profit % (pnl_npr as % of cost basis — distinct from return_pct which is gross price move)
+        cost_basis = entry_price * shares
+        pnl_pct    = round(pnl_npr / cost_basis * 100, 4) if cost_basis else 0.0
+
         loss_cause = "NULL"
         if result == "LOSS":
             hold_days  = int(position.get("hold_days_actual") or 1)
@@ -325,7 +330,7 @@ def _write_trade_journal(position: dict, deltas: dict,
             "created_at":           _now_nst(),
             "symbol":               symbol,
             "sector":               position.get("sector", ""),
-            "paper_mode":           "true" if paper else get_setting("PAPER_MODE", "true"),
+            "paper_mode":           "true" if paper else "false",   # paper=False means a real `portfolio` (MeroShare) position
             "entry_date":           position.get("entry_date", ""),
             "entry_price":          str(entry_price),
             "shares":               str(shares),
@@ -362,6 +367,7 @@ def _write_trade_journal(position: dict, deltas: dict,
             "hold_days_actual":     position.get("hold_days_actual", ""),
             "return_pct":           str(return_pct),
             "pnl_npr":              str(pnl_npr),
+            "pnl_pct":              str(pnl_pct),
             "result":               result,
             "geo_delta":            str(deltas["geo_delta"]),
             "nepal_delta":          str(deltas["nepal_delta"]),
@@ -371,6 +377,21 @@ def _write_trade_journal(position: dict, deltas: dict,
             "loss_cause":           loss_cause,
             "lesson_ids":           "",
         }
+
+        # How this buy came about (CLAUDE_BUY / WAIT_CONDITION_MET / OVERRIDE_* / ADHOC) + indicator
+        # snapshot for entries with no BUY row. Never blocks the journal write.
+        try:
+            from modules.trade_origin import origin_for, snapshot
+            _o, _ref, _days, _inf = origin_for(symbol, str(position.get("entry_date", ""))[:10])
+            row.update({"entry_origin": _o, "origin_ref_id": _ref,
+                        "origin_days": "" if _days is None else str(_days),
+                        "origin_inferred": "true" if _inf else "false"})
+            with _conn() as _sc:
+                for _k, _v in snapshot(_sc, symbol, str(position.get("entry_date", ""))[:10]).items():
+                    if not row.get(_k):
+                        row[_k] = _v
+        except Exception as _oe:
+            log.warning("entry origin lookup failed for %s: %s", symbol, _oe)
 
         # Pull momentum/live fields from market_log BUY row at entry time
         _momentum_defaults = {
@@ -390,11 +411,11 @@ def _write_trade_journal(position: dict, deltas: dict,
                            vwap_dev, bid_ask_ratio, dpr_proximity
                     FROM market_log
                     WHERE symbol = %s AND action = 'BUY'
-                      AND date::date = %s::date
-                    ORDER BY id DESC
+                      AND (date::date = %s::date OR id = NULLIF(%s, '')::int)
+                    ORDER BY (id = NULLIF(%s, '')::int) DESC, id DESC
                     LIMIT 1
                     """,
-                    (symbol, entry_date_str),
+                    (symbol, entry_date_str, row.get("origin_ref_id", ""), row.get("origin_ref_id", "")),
                 )
                 _ml = _cur.fetchone() or {}
             row.update({
@@ -1119,19 +1140,13 @@ def run_paper_audit(dry_run: bool = False) -> dict:
         log.error("nepal_score fetch failed: %s", e)
         nepal_score = 0.0
 
-    # ── Load closed, unaudited paper trades ───────────────────────────────────
+    # ── Load closed, unaudited paper trades via trading service REST ─────────
     try:
-        with _conn() as cur:
-            cur.execute("""
-                SELECT * FROM paper_portfolio
-                WHERE status = 'CLOSED'
-                AND (audited IS NULL OR audited = 'false')
-                ORDER BY exit_date ASC
-            """)
-            closed_rows = cur.fetchall()
+        from clients.trading_client import fetch_unaudited_paper_trades, TradingServiceError
+        closed_rows = fetch_unaudited_paper_trades(limit=500)
         log.info("Unaudited closed paper trades: %d", len(closed_rows))
     except Exception as e:
-        log.error("paper_portfolio load failed: %s", e)
+        log.error("paper_portfolio load failed (trading service unreachable): %s — skipping audit", e)
         return summary
 
     if not closed_rows:
@@ -1191,6 +1206,35 @@ def run_paper_audit(dry_run: bool = False) -> dict:
 
             position = _enrich_position_with_entry_context(position)
 
+            # Backfill NEPSE index + Nepal score on the entry date so _compute_deltas
+            # can calculate nepse_return_pct and alpha correctly (without this,
+            # nepse_entry=0 makes alpha == return_pct on every row).
+            entry_day = str(position.get("entry_date") or "")[:10]
+            if entry_day:
+                try:
+                    with _conn() as _cur:
+                        if not position.get("nepse_index_entry"):
+                            _cur.execute(
+                                "SELECT current_value FROM nepse_indices WHERE index_id = '58' "
+                                "AND date <= %s AND current_value <> '' ORDER BY date DESC LIMIT 1",
+                                (entry_day,))
+                            _r = _cur.fetchone()
+                            if _r:
+                                position["nepse_index_entry"] = str(_r["current_value"]).replace(",", "")
+                        if not position.get("nepal_score_entry"):
+                            _cur.execute(
+                                "SELECT nepal_score FROM nepal_pulse WHERE date <= %s "
+                                "AND nepal_score <> '' ORDER BY date DESC, time DESC LIMIT 1",
+                                (entry_day,))
+                            _r = _cur.fetchone()
+                            if _r:
+                                position["nepal_score_entry"] = str(_r["nepal_score"])
+                    if not position.get("combined_geo_entry") and position.get("nepal_score_entry") != "":
+                        position["combined_geo_entry"] = str(
+                            float(position.get("geo_score_entry") or 0) + float(position.get("nepal_score_entry") or 0))
+                except Exception as _ie:
+                    log.warning("Entry index/nepal lookup failed for %s: %s", symbol, _ie)
+
             exit_context = {
                 "exit_price":       exit_price,
                 "exit_date":        exit_date,
@@ -1241,17 +1285,15 @@ def run_paper_audit(dry_run: bool = False) -> dict:
                 except Exception as e:
                     log.warning("market_log link failed for %s: %s", symbol, e)
 
-                # Stamp audited='true'
-                try:
-                    with _conn() as cur:
-                        cur.execute(
-                            "UPDATE paper_portfolio SET audited = 'true' WHERE id = %s",
-                            (row["id"],)
-                        )
-                    log.info("%s (paper): stamped audited=true (id=%s)", symbol, row["id"])
-                except Exception as e:
-                    log.error("Failed to stamp audited for %s id=%s: %s",
-                              symbol, row["id"], e)
+                # Stamp audited='true' via trading service REST
+                from clients.trading_client import mark_paper_trade_audited
+                ok = mark_paper_trade_audited(row["portfolio_id"])
+                if ok:
+                    log.info("%s (paper): stamped audited=true (portfolio_id=%s)",
+                             symbol, row["portfolio_id"])
+                else:
+                    log.error("Failed to stamp audited for %s portfolio_id=%s",
+                              symbol, row["portfolio_id"])
 
             processed_trades.append({
                 "symbol":     symbol,

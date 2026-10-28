@@ -98,7 +98,7 @@ SYSTEMD_DIR="$HOME/.config/systemd/user"
 mkdir -p "$SYSTEMD_DIR"
 
 # Services that use %i (username) and /opt/nepse-engine path — substitute both
-for svc in nepse-bot nepse-morning nepse-trading nepse-eod nepse-weekly nepse-sleep nepse-backup nepse-monitor; do
+for svc in nepse-dashboard nepse-morning nepse-trading nepse-eod nepse-weekly nepse-sleep nepse-backup nepse-monitor nepse-indicators-refresh; do
     if [ -f "setup/${svc}.service" ]; then
         sed "s|%i|$NEPSE_USER|g; s|/opt/nepse-engine|$PROJECT_DIR|g" \
             "setup/${svc}.service" > "$SYSTEMD_DIR/${svc}.service"
@@ -119,7 +119,7 @@ for svc in ollama ollama-stop; do
 done
 
 # All timers — copy as-is
-for tmr in nepse-morning nepse-trading nepse-eod nepse-weekly nepse-sleep nepse-backup nepse-gitpull nepse-summary nepse-monitor ollama ollama-stop; do
+for tmr in nepse-morning nepse-trading nepse-eod nepse-weekly nepse-sleep nepse-backup nepse-gitpull nepse-summary nepse-indicators-refresh ollama ollama-stop; do
     if [ -f "setup/${tmr}.timer" ]; then
         cp "setup/${tmr}.timer" "$SYSTEMD_DIR/${tmr}.timer"
         ok "Installed $tmr.timer"
@@ -136,22 +136,22 @@ ok "systemd daemon reloaded"
 step "5/9  Enabling systemd timers and services"
 
 # Enable all timers
-for tmr in nepse-morning nepse-trading nepse-eod nepse-weekly nepse-sleep nepse-backup nepse-gitpull nepse-summary nepse-monitor ollama ollama-stop; do
+for tmr in nepse-morning nepse-trading nepse-eod nepse-weekly nepse-sleep nepse-backup nepse-gitpull nepse-summary nepse-indicators-refresh ollama ollama-stop; do
     systemctl --user enable ${tmr}.timer 2>/dev/null && ok "Enabled $tmr.timer" || warn "$tmr.timer not found — skipping"
 done
 
 # Enable persistent services (always-on)
-systemctl --user enable nepse-bot.service
+systemctl --user enable nepse-dashboard.service
 systemctl --user enable nepse-monitor.service
 
 # Start all timers (they fire at their next scheduled time)
-for tmr in nepse-morning nepse-trading nepse-eod nepse-weekly nepse-sleep nepse-backup nepse-gitpull nepse-summary nepse-monitor ollama ollama-stop; do
+for tmr in nepse-morning nepse-trading nepse-eod nepse-weekly nepse-sleep nepse-backup nepse-gitpull nepse-summary nepse-indicators-refresh ollama ollama-stop; do
     systemctl --user start ${tmr}.timer 2>/dev/null && ok "Started $tmr.timer" || warn "$tmr.timer start skipped"
 done
 
 # Start persistent services immediately
-systemctl --user start nepse-bot.service
-ok "Started nepse-bot.service"
+systemctl --user start nepse-dashboard.service
+ok "Started nepse-dashboard.service"
 
 ok "All timers enabled and started"
 

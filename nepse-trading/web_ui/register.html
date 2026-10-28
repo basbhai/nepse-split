@@ -198,14 +198,14 @@
 </div>
 
 <script>
-const API = `http://${window.location.hostname}:8766`;
+const API = window.location.origin;
 
 async function checkAPI() {
   try {
     const r = await fetch(`${API}/health`, { signal: AbortSignal.timeout(2000) });
     if (r.ok) {
       document.getElementById('apiDot').className = 'api-dot online';
-      document.getElementById('apiStatusText').textContent = 'api online :8766';
+      document.getElementById('apiStatusText').textContent = 'api online';
     } else throw new Error();
   } catch {
     document.getElementById('apiDot').className = 'api-dot offline';
@@ -235,11 +235,13 @@ async function handleSubmit(e) {
     });
     const d = await r.json();
     if (r.ok) {
-      const detail = d.status === 'updated'
-        ? `Updated existing record (id ${d.id})`
-        : `Created — telegram_id: ${d.telegram_id}`;
-      banner.className = 'status-banner success';
-      banner.innerHTML = `✓ ${d.status.charAt(0).toUpperCase() + d.status.slice(1)}: ${detail}`;
+      if (d.status === 'already_registered') {
+        banner.className = 'status-banner success';
+        banner.innerHTML = `✓ Already registered. Use /setpin in Telegram then visit <a href="/credentials" style="color:var(--green)">/credentials</a>.`;
+      } else {
+        banner.className = 'status-banner success';
+        banner.innerHTML = `✓ Registered! Pending admin approval. Once approved, use /setpin in Telegram to access <a href="/credentials" style="color:var(--green)">/credentials</a>.`;
+      }
     } else {
       throw new Error(d.detail || 'Unknown error');
     }

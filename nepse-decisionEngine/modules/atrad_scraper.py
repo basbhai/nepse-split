@@ -685,7 +685,9 @@ def fetch_my_trades(security_id: str = "ALL", client_order_id: str = "",
     (unix seconds), trade_date (str)}. Empty list on any failure or no fills.
 
     NOTE: like get_portfolio(), this is an ORDER-account (BS92009) read. It
-    may ONLY be called from within execution_monitor's live-exit follow-up
+    may ONLY be called from within execution_monitor's live-exit follow-up,
+    or from modules/trade_origin.daily() — ONE read per trading day after
+    close (user-approved 2026-10-03 to capture buy fills and classify their origin)
     (_work_live_pending_exit), and only on that function's own long cooldown
     (see _LIVE_EXIT_RECHECK_SEC) — i.e. strictly in the aftermath of a live
     order this same process just placed, never on an independent schedule.
@@ -699,7 +701,8 @@ def fetch_my_trades(security_id: str = "ALL", client_order_id: str = "",
         "TMS_ROADSHOW_CLIENT_LABEL",
         f"{ORDER_USERNAME} ( BASANTA SHRESTHA-202105112274903)",
     )
-    try:
+
+    def _call() -> dict:
         r = _order_session.get(
             f"{BASE_URL}/client",
             params={
@@ -713,10 +716,28 @@ def fetch_my_trades(security_id: str = "ALL", client_order_id: str = "",
             },
             timeout=20,
         )
-        data = _parse(r)
+        return _parse(r)
+
+    try:
+        data = _call()
         if data.get("code") != "0":
-            log.warning("fetch_my_trades: non-zero code: %s", data.get("code"))
-            return []
+            # checkUserSession (what _ensure_order_session's keepalive ping
+            # uses) has been observed to report code=0 "valid" on a BS92009
+            # session that getMyTradesFilled itself then rejects with the
+            # login page HTML (confirmed 2026-09-22: 3 consecutive recheck
+            # cycles silently failed this way, leaving a fully-filled PHCL
+            # exit unreconciled for 90+ min). checkUserSession is therefore
+            # not a reliable proxy for this specific endpoint — force one
+            # real re-login and retry here instead of trusting it.
+            log.warning(
+                "fetch_my_trades: non-zero code: %s — forcing re-login and retrying once",
+                data.get("code"),
+            )
+            if _order_login():
+                data = _call()
+            if data.get("code") != "0":
+                log.warning("fetch_my_trades: still non-zero code after re-login: %s", data.get("code"))
+                return []
         rows = data.get("data", {}).get("blotterdata", []) or []
         out = []
         for row in rows:

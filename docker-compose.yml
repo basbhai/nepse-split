@@ -1,0 +1,130 @@
+version: '3.9'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEPSE Split — Docker Compose (Linux shadow-live environment)
+#
+# Two isolated PostgreSQL databases + two Python services.
+# All cross-service traffic stays on the 'nepse' network.
+#
+# Usage:
+#   docker compose up --build          # cold start
+#   docker compose up -d               # detached
+#   docker compose logs -f engine      # follow engine logs
+#   docker compose logs -f trading     # follow trading logs
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  nepse:
+    driver: bridge
+
+volumes:
+  engine_db_data:
+  trading_db_data:
+
+services:
+
+  # ── Databases ─────────────────────────────────────────────────────────────
+
+  engine-db:
+    image: postgres:15-alpine
+    container_name: nepse_engine_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       nepse_decision_engine
+      POSTGRES_USER:     nepse
+      POSTGRES_PASSWORD: nepse_local
+    volumes:
+      - engine_db_data:/var/lib/postgresql/data
+    networks:
+      - nepse
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nepse -d nepse_decision_engine"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  trading-db:
+    image: postgres:15-alpine
+    container_name: nepse_trading_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       nepse_trading
+      POSTGRES_USER:     nepse
+      POSTGRES_PASSWORD: nepse_local
+    volumes:
+      - trading_db_data:/var/lib/postgresql/data
+    networks:
+      - nepse
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nepse -d nepse_trading"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Engine service (port 8766) ─────────────────────────────────────────────
+
+  engine:
+    build:
+      context: ./nepse-decisionEngine
+      dockerfile: Dockerfile
+    container_name: nepse_engine
+    restart: unless-stopped
+    depends_on:
+      engine-db:
+        condition: service_healthy
+      trading:
+        condition: service_started
+    env_file: ./nepse-decisionEngine/.env
+    environment:
+      DATABASE_URL:      postgresql://nepse:nepse_local@engine-db:5432/nepse_decision_engine
+      LOCAL_DATABASE_URL: postgresql://nepse:nepse_local@engine-db:5432/nepse_decision_engine
+      TRADING_BASE_URL:  http://trading:8767
+      PAPER_MODE:        "true"
+    ports:
+      - "8766:8766"
+    networks:
+      - nepse
+    volumes:
+      - ./nepse-decisionEngine:/app      # live code mount for development
+      - /app/venv                         # keep venv inside container
+      - /app/__pycache__
+    command: python -m uvicorn web_ui.dashboard_api:app --host 0.0.0.0 --port 8766 --reload
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8766/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Trading service (ports 8767 + 8768) ───────────────────────────────────
+
+  trading:
+    build:
+      context: ./nepse-trading
+      dockerfile: Dockerfile
+    container_name: nepse_trading
+    restart: unless-stopped
+    depends_on:
+      trading-db:
+        condition: service_healthy
+    env_file: ./nepse-trading/.env
+    environment:
+      DATABASE_URL:    postgresql://nepse:nepse_local@trading-db:5432/nepse_trading
+      ENGINE_BASE_URL: http://engine:8766
+      SANDBOX_MODE:    "true"
+    ports:
+      - "8767:8767"   # trading_api (engine → trading signals)
+      - "8768:8768"   # register_api (user-facing web UI)
+    networks:
+      - nepse
+    volumes:
+      - ./nepse-trading:/app
+      - /app/venv
+      - /app/__pycache__
+    command: python main.py
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8767/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

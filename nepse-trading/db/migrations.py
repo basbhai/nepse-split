@@ -344,8 +344,28 @@ def apply_drift(drift: dict) -> dict:
 
 
 # ─────────────────────────────────────────
-# TRIGGERS
+# SEED
 # ─────────────────────────────────────────
+
+_TRADING_SETTINGS = [
+    ("PAPER_MODE",        "true",  "true = paper trading, false = live"),
+    ("BROKERAGE_RATE_PCT","0.40",  "broker commission as % of trade value"),
+    ("SEBON_FEE_PCT",     "0.015", "SEBON regulatory fee as % of trade value"),
+    ("DP_FEE_NPR",        "25",    "CDSC DP fee per transaction in NPR"),
+    ("MAX_OPEN_POSITIONS","5",     "max simultaneous open positions for SYSTEM_BOT"),
+    ("MAX_ALLOC_PCT",     "30",    "max % of capital in a single position"),
+]
+
+def seed_settings():
+    """Insert default trading settings — ON CONFLICT DO NOTHING (idempotent)."""
+    with _db() as cur:
+        for key, value, description in _TRADING_SETTINGS:
+            cur.execute("""
+                INSERT INTO settings (key, value, description)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (key) DO NOTHING
+            """, (key, value, description))
+    log.info("Settings seeded (%d defaults)", len(_TRADING_SETTINGS))
 
 
 # ─────────────────────────────────────────
@@ -381,6 +401,7 @@ def run_migrations() -> dict:
     )
 
     stats = apply_drift(drift)
+    seed_settings()
 
     stats["status"] = "migrated"
     return stats

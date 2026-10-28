@@ -132,6 +132,7 @@ TOKEN          = os.environ["TELEGRAM_BOT_TOKEN"]
 ADMIN_CHAT_ID  = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))   # admin only
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+TRADING_UI_URL = os.environ.get("TRADING_UI_URL", "http://localhost:8768")
 
 # SANDBOX_MODE lives in trading_core — set via trading_core.SANDBOX_MODE in main()
 # _circuit_breakers is the shared mutable dict from trading_core
@@ -150,6 +151,7 @@ from modules.trading_core import (
     reset_user_paper_data,
     execute_buy, execute_sell,
     mode_label, circuit_label, fmt_npr, win_rate_str, sandbox_label, market_gate_message,
+    set_user_pin_hash,
 )
 
 
@@ -365,6 +367,8 @@ async def cmd_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"✅ *Registration received!*\n\n"
             f"Your request is pending admin approval.\n"
             f"You will be notified here once approved.\n\n"
+            f"📋 While you wait, set up your credentials:\n"
+            f"{TRADING_UI_URL}/credentials\n\n"
             f"Your Telegram ID: `{uid}`",
             parse_mode="Markdown"
         )
@@ -381,6 +385,30 @@ async def cmd_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 ),
                 parse_mode="Markdown"
             )
+
+
+async def cmd_setpin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_approved(uid):
+        await update.message.reply_text("You need an approved account to set a web PIN.")
+        return
+    args = ctx.args
+    if not args or not args[0].isdigit() or not (4 <= len(args[0]) <= 8):
+        await update.message.reply_text("Usage: /setpin <4-8 digit PIN>")
+        return
+    try:
+        ok = set_user_pin_hash(uid, args[0])
+    except Exception as e:
+        log.error("setpin(%s): %s", uid, e)
+        ok = False
+    if ok:
+        await update.message.reply_text(
+            f"✅ Web PIN set. Visit {TRADING_UI_URL}/credentials to set up your accounts."
+        )
+    else:
+        await update.message.reply_text(
+            "Could not find your account record. Contact the admin."
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -975,20 +1003,41 @@ async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_signal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
-    signals = run_raw_sql(
-        "SELECT * FROM market_log WHERE outcome = 'PENDING' ORDER BY id DESC LIMIT 5"
-    )
-    if not signals:
-        await update.message.reply_text("No pending signals in market_log.")
-        return
-    lines = ["*Latest AI Signals*\n"]
-    for s in signals:
-        em = "🟢" if s.get("action") == "BUY" else ("🔴" if s.get("action") == "AVOID" else "⚪")
-        lines.append(
-            f"{em} *{s['symbol']}* — {s.get('action')} | {s.get('date')}\n"
-            f"  Conf: {s.get('confidence')}% | Entry: {s.get('entry_price')}\n"
-            f"  _{str(s.get('reasoning',''))[:100]}..._\n"
+    from clients.engine_client import fetch_signals, EngineServiceError
+    try:
+        data = fetch_signals()
+    except EngineServiceError:
+        await update.message.reply_text(
+            "⚠️ Engine unavailable — signals cannot be fetched right now. Try again shortly."
         )
+        return
+    signals = data.get("signals", []) if isinstance(data, dict) else data
+    if not signals:
+        today = data.get("date", "") if isinstance(data, dict) else ""
+        await update.message.reply_text(
+            f"No pending BUY signals today{(' (' + today + ')') if today else ''}."
+        )
+        return
+    today = data.get("date", "") if isinstance(data, dict) else ""
+    lines = [f"*Today's BUY Signals*{(' — ' + today) if today else ''}\n"]
+    for s in signals:
+        conf  = float(s.get("confidence") or 0)
+        em    = "🟢" if conf >= 70 else "🟡"
+        entry = float(s.get("entry_price") or 0)
+        stop  = float(s.get("stop_loss") or 0)
+        tgt   = float(s.get("target") or 0)
+        line  = (
+            f"{em} *{s['symbol']}* | {conf:.0f}% | {s.get('primary_signal','')}\n"
+            f"  Entry: NPR {entry:,.0f}"
+        )
+        if stop:
+            line += f" | SL: {stop:,.0f}"
+        if tgt:
+            line += f" | T: {tgt:,.0f}"
+        reason = str(s.get("reasoning") or s.get("gemini_reason") or "")[:120]
+        if reason:
+            line += f"\n  _{reason}_"
+        lines.append(line + "\n")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -1232,7 +1281,11 @@ async def cmd_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(f"❌ Parse error: {e}")
         return ConversationHandler.END
 
-    matches = lookup_symbols(symbol)
+    try:
+        matches = lookup_symbols(symbol)
+    except ValueError:
+        await update.message.reply_text("❌ Symbol lookup unavailable — engine is down. Try again shortly.")
+        return ConversationHandler.END
     if not matches:
         await update.message.reply_text(f"❌ Symbol *{symbol}* not found in NEPSE.", parse_mode="Markdown")
         return ConversationHandler.END
@@ -1407,7 +1460,11 @@ async def cmd_sell(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(f"❌ Parse error: {e}")
         return ConversationHandler.END
 
-    matches = lookup_symbols(symbol)
+    try:
+        matches = lookup_symbols(symbol)
+    except ValueError:
+        await update.message.reply_text("❌ Symbol lookup unavailable — engine is down. Try again shortly.")
+        return ConversationHandler.END
     if not matches:
         await update.message.reply_text(f"❌ Symbol *{symbol}* not found in NEPSE.", parse_mode="Markdown")
         return ConversationHandler.END
@@ -1877,6 +1934,7 @@ def main():
     app.add_handler(switchmode_conv)
 
     app.add_handler(CommandHandler("register", cmd_register))
+    app.add_handler(CommandHandler("setpin",   cmd_setpin))
     app.add_handler(CommandHandler("approve",  cmd_approve))
     app.add_handler(CommandHandler("deny",     cmd_deny))
     app.add_handler(CommandHandler("users",    cmd_users))

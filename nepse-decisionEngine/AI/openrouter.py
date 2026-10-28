@@ -46,6 +46,10 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek/deepseek-r1")
 # behaviour by disabling it (set CLAUDE_DISABLE_REASONING=false to A/B test).
 CLAUDE_DISABLE_REASONING = os.getenv("CLAUDE_DISABLE_REASONING", "true").lower() != "false"
 
+# Per-attempt HTTP detail of the most recent _call (status + full body, or error). Read by the monthly council
+# to log every prompt/response/reasoning/usage. Reset at the start of each _call.
+LAST_CALL: dict = {"attempts": []}
+
 MAX_RETRIES = 5
 JITTER_MIN  = 4    # seconds
 JITTER_MAX  = 15   # seconds
@@ -155,7 +159,7 @@ def _strip_fences(raw: str) -> str:
 def _call(
     model:      str,
     messages:   list,
-    max_tokens: int,
+    max_tokens: Optional[int],
     temperature: float,
     context:    str,
     extra_body: Optional[dict] = None,
@@ -182,10 +186,11 @@ def _call(
     def _build_payload(with_search: bool) -> dict:
         p = {
             "model":       model,
-            "max_tokens":  max_tokens,
             "temperature": temperature,
             "messages":    messages,
         }
+        if max_tokens:                      # None/0 = no cap (council uses this so nothing is truncated)
+            p["max_tokens"] = max_tokens
         if extra_body:
             p.update(extra_body)
         if with_search:
@@ -214,6 +219,7 @@ def _call(
 
     last_error   = ""
     current_search = use_search
+    LAST_CALL.clear(); LAST_CALL["attempts"] = []
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -228,6 +234,7 @@ def _call(
                 json=_build_payload(current_search),
                 timeout=120,
             )
+            LAST_CALL["attempts"].append({"attempt": attempt, "status": resp.status_code, "body": resp.text})
 
             if resp.status_code in _RETRYABLE_STATUS:
                 last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
@@ -279,6 +286,7 @@ def _call(
 
         except requests.exceptions.Timeout as exc:
             last_error = str(exc)
+            LAST_CALL["attempts"].append({"attempt": attempt, "error": "timeout: " + last_error})
             if attempt < MAX_RETRIES:
                 wait = random.uniform(JITTER_MIN, JITTER_MAX)
                 log.warning(
@@ -289,6 +297,7 @@ def _call(
 
         except requests.exceptions.ConnectionError as exc:
             last_error = str(exc)
+            LAST_CALL["attempts"].append({"attempt": attempt, "error": "connection: " + last_error})
             if attempt < MAX_RETRIES:
                 wait = random.uniform(JITTER_MIN, JITTER_MAX)
                 log.warning(
@@ -299,6 +308,7 @@ def _call(
 
         except Exception as exc:
             last_error = str(exc)
+            LAST_CALL["attempts"].append({"attempt": attempt, "error": last_error})
             if _is_retryable_exc(exc) and attempt < MAX_RETRIES:
                 wait = random.uniform(JITTER_MIN, JITTER_MAX)
                 log.warning(

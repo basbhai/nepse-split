@@ -60,6 +60,7 @@ Run modes:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -68,6 +69,7 @@ import statistics
 import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -95,7 +97,7 @@ COUNCIL_USE_FREE_STACK = True  # ← fallback default: True for free models, Fal
 _FREE_MODELS = [
   
 
-    "openai/gpt-oss-120b:free"
+    "openai/gpt-oss-120b"   # the :free variant was removed from OpenRouter; paid is ~$0.04/$0.17 per M tokens
 
   
   
@@ -112,19 +114,19 @@ def _next_free_model() -> str:
 
 # ── Production model constants ────────────────────────────────────────────────
 # Pre-council / agenda stages (cheap)
-_PROD_AUDIT_MODEL    = "openai/gpt-5.4-nano"
+_PROD_AUDIT_MODEL    = "openai/gpt-5.6-luna"
 _PROD_REVIEW_MODEL   = "anthropic/claude-haiku-4.5"
 
 # Discussion models (5 flagship models — different families)
-_PROD_GROK_MODEL     = "x-ai/grok-4.3"
-_PROD_GPT_MODEL      = "openai/gpt-5.5"
-_PROD_DEEPSEEK_MODEL = "deepseek/deepseek-v4-pro"
+_PROD_GROK_MODEL     = "x-ai/grok-4.7"
+_PROD_GPT_MODEL      = "openai/gpt-5.6-sol"
+_PROD_DEEPSEEK_MODEL = "deepseek/deepseek-v4-pro-0813"
 _PROD_GEMINI_MODEL   = "google/gemini-3.1-pro-preview"
-_PROD_SONNET_MODEL   = "anthropic/claude-sonnet-4.6"
+_PROD_SONNET_MODEL   = "anthropic/claude-sonnet-5.5"
 
 # Post-discussion (flagship)
-_PROD_REDTEAM_MODEL  = "anthropic/claude-opus-4.6"
-_PROD_CHAIRMAN_MODEL = "anthropic/claude-opus-4.7"
+_PROD_REDTEAM_MODEL  = "anthropic/claude-opus-5.5"
+_PROD_CHAIRMAN_MODEL = "anthropic/claude-opus-5.5"
 
 # ── Active model constants (resolved at import based on stack switch) ─────────
 # When free stack: all stages use _next_free_model() at call time.
@@ -641,6 +643,17 @@ def _fetch_research_findings() -> str:
         return ""
 
 
+def _fetch_decision_study() -> str:
+    """Latest decision-context study text (market/sector indicators around every BUY/WAIT/AVOID decision).
+    Produced by `python -m analysis.decision_context_study`; empty string if it has not been run."""
+    try:
+        f = Path(__file__).resolve().parent.parent / "output" / "study" / "decision_context_summary.json"
+        return json.loads(f.read_text()).get("council_text", "")[:2500] if f.exists() else ""
+    except Exception as e:
+        log.warning("decision study load failed (non-fatal): %s", e)
+        return ""
+
+
 _ENRICHER_FETCHERS = {
     "trade_journal_summary":    _fetch_trade_summary,
     "open_positions_by_sector": _fetch_open_positions,
@@ -805,6 +818,19 @@ def _build_data_context(
             "Insufficient data (new feature May 2026)"
         )
 
+    try:
+        from analysis.findings_log import digest as _fd
+        from analysis.lesson_curator import digest as _cd
+        for title, t in (("KNOWN OPEN ISSUES (persisted across runs)", _fd()), ("LESSON CURATOR (did each active lesson work?)", _cd())):
+            if t:
+                parts.append(f"=== {title} ===\n" + t)
+    except Exception as e:
+        log.warning("findings/curator context skipped (non-fatal): %s", e)
+
+    study = _fetch_decision_study()
+    if study:
+        parts.append("=== DECISION-CONTEXT STUDY (NEPSE + sector indicators at each BUY/WAIT/AVOID decision) ===\n" + study)
+
     context = "\n\n".join(parts)
     counts  = {
         "daily_context": len(dc_rows), "trade_journal": len(tj_rows),
@@ -846,11 +872,17 @@ def _council_call(
     _PROVIDER_MAP = {
         "anthropic/claude-haiku-4.5":   {"order": ["Anthropic"],      "allow_fallbacks": False},
         "anthropic/claude-sonnet-4.6":  {"order": ["Anthropic 2"],    "allow_fallbacks": False},
+        "anthropic/claude-sonnet-5.5":  {"order": ["Anthropic 2"],    "allow_fallbacks": False},
         "anthropic/claude-opus-4.6":    {"order": ["Anthropic"],      "allow_fallbacks": False},
         "anthropic/claude-opus-4.7":    {"order": ["Amazon Bedrock"], "allow_fallbacks": False},
+        "anthropic/claude-opus-5.5":    {"order": ["Anthropic"],      "allow_fallbacks": False},
         "openai/gpt-5.4-nano":          {"order": ["OpenAI"],         "allow_fallbacks": False},
         "openai/gpt-5.5":              {"order": ["OpenAI"],         "allow_fallbacks": False},
+        "openai/gpt-5.6-luna":          {"order": ["OpenAI"],         "allow_fallbacks": False},
+        "openai/gpt-5.6-sol":           {"order": ["OpenAI"],         "allow_fallbacks": False},
+        "x-ai/grok-4.7":               {"order": ["xAI"],            "allow_fallbacks": False},
         "deepseek/deepseek-v4-pro":     {"order": ["DeepSeek"],       "allow_fallbacks": False},
+        "deepseek/deepseek-v4-pro-0813":{"order": ["DeepSeek"],       "allow_fallbacks": False},
     }
     provider_routing = _PROVIDER_MAP.get(model)
     extra_body = {"provider": provider_routing} if provider_routing else None
@@ -1682,6 +1714,27 @@ def _load_agenda_preview() -> tuple[list[str], list[str]]:
         log.error("Failed to load agenda preview: %s", e)
 
     return proposed, []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RUN AUDIT LOG, CACHE (resume) AND FAIL-FAST
+#   output/council_runs/<run_month>/calls.jsonl  — every AI call: full prompt, response, reasoning, usage, errors
+#   output/council_runs/<run_month>/cache/<hash> — successful responses; a resumed run replays them for free
+# ═══════════════════════════════════════════════════════════════════════════════
+class CouncilStageFailed(RuntimeError):
+    """A council AI stage returned nothing usable. The meeting is cancelled; fix, then rerun with --resume."""
+
+
+_RUN_DIR: Optional[Path] = None
+_STRICT_JSON = ("council_stage_", "council_6_", "council_7_")
+
+
+def _jlog(rec: dict) -> None:
+    if _RUN_DIR is None:
+        return
+    rec = {"ts": datetime.now(NST).isoformat(timespec="seconds"), **rec}
+    with open(_RUN_DIR / "calls.jsonl", "a") as f:
+        f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
 
 def run_preview(dry_run: bool = False) -> None:

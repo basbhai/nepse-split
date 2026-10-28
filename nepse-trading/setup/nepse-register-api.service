@@ -1,0 +1,21 @@
+[Unit]
+Description=NEPSE Trading — Register/Credentials UI (port 8768)
+After=network-online.target nepse-trading-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nepse-trading
+ExecStart=/opt/nepse-trading/venv/bin/python -m uvicorn register_api:app --host 0.0.0.0 --port 8768
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nepse-register-api
+EnvironmentFile=/opt/nepse-trading/.env
+
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

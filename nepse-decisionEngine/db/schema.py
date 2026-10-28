@@ -29,6 +29,7 @@ TABS: dict[str, str] = {
     "fd_rates": "fd_rates",
     "fd_rate_summary": "fd_rate_summary",
     "share_sectors": "share_sectors",
+    "findings_log": "findings_log",
     "gate_misses": "gate_misses",
     "gate_proposals": "gate_proposals",
     "claude_audit": "claude_audit",
@@ -853,6 +854,26 @@ TABLE_DDL: dict[str, str] = {
     );
     """,
 
+    "findings_log": """
+    CREATE TABLE IF NOT EXISTS "findings_log" (
+        id SERIAL PRIMARY KEY,
+        topic_key TEXT NOT NULL,
+        source TEXT,
+        finding TEXT,
+        severity TEXT,
+        status TEXT DEFAULT 'OPEN',
+        status_note TEXT,
+        first_seen TEXT,
+        last_seen TEXT,
+        times_seen TEXT,
+        closed_at TEXT,
+        inserted_at TIMESTAMPTZ DEFAULT NOW(),
+        CONSTRAINT ux_findings_log_topic_key UNIQUE (topic_key)
+    );
+    CREATE INDEX IF NOT EXISTS ix_findings_log_status
+        ON "findings_log" (status);
+    """,
+
     "gate_misses": """
     CREATE TABLE IF NOT EXISTS "gate_misses" (
         id SERIAL PRIMARY KEY,
@@ -1436,6 +1457,7 @@ TABLE_COLUMNS: dict[str, list[str]] = {
     "fd_rates": ["fetch_date", "institute_code", "institute_name", "product_name", "interest_rate", "interest_pct", "tenure_label", "tenure_months", "tenure_category", "minimum_balance", "institute_type", "source"],
     "fd_rate_summary": ["fetch_date", "avg_rate_pct", "max_rate_pct", "min_rate_pct", "benchmark_rate_pct", "benchmark_products", "best_bank_name", "best_bank_rate", "best_tenure", "rate_vs_prev_pct", "rate_direction", "fd_score_signal", "total_products"],
     "share_sectors": ["externalid", "companyname", "symbol", "securityname", "status", "companyemail", "website", "sectorname", "regulatorybody", "instrumenttype"],
+    "findings_log": ["topic_key", "source", "finding", "severity", "status", "status_note", "first_seen", "last_seen", "times_seen", "closed_at"],
     "gate_misses": ["date", "symbol", "sector", "gate_reason", "gate_category", "price_at_block", "market_state", "tech_score", "conf_score", "volume_os_ratio", "vwap_dev", "bid_ask_ratio", "dpr_proximity", "composite_score_would_be", "tracking_days", "outcome", "outcome_return_pct", "outcome_stamped_at", "decision", "max_high_20d", "max_drawdown_20d", "peak_day", "would_have_caught", "outcome_tier", "engine_source"],
     "gate_proposals": ["review_week", "proposal_number", "parameter_name", "current_value", "proposed_value", "reasoning", "false_block_rate", "sample_size", "status", "decided_at", "applied_at"],
     "claude_audit": ["review_week", "buy_count", "buy_win_rate", "buy_avg_return", "wait_count", "wait_accuracy", "wait_evaluated_count", "avoid_count", "avoid_accuracy", "avoid_evaluated_count", "false_avoid_rate", "missed_entry_rate", "overall_accuracy", "macro_accuracy", "audit_summary"],

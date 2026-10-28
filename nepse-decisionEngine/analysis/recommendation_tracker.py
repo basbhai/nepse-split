@@ -229,7 +229,7 @@ def get_macro_snapshot(eval_date: str) -> dict:
         nrb_rows = run_raw_sql(
             "SELECT policy_rate FROM nrb_monthly "
             "WHERE policy_rate IS NOT NULL "
-            "ORDER BY fiscal_year DESC, month_number DESC LIMIT 1"
+            "ORDER BY id DESC LIMIT 1"
         )
         if nrb_rows:
             snapshot["eval_policy_rate"] = nrb_rows[0]["policy_rate"]

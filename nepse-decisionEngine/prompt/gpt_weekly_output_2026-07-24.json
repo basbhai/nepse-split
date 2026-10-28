@@ -1,0 +1,51 @@
+{
+  "review_summary": "System performance in W30 reflects a stabilized macro environment post-oversold recovery, with NEPSE rebounding 156 points from the 2570 eight-month low to 2726.72 (3.06% bounce). Claude's defensive discipline remained strong: 31 of 32 evaluated WAIT decisions were correct (wait_accuracy 0.9688), and all 23 evaluated AVOID decisions were correct (avoid_accuracy 1.0, zero false avoids). The critical calibration issue from W28-W29 has not recurred: DXY labelling stayed appropriately neutral at 100.5-101.2 throughout the week, correctly subordinating any minor remittance signals to dominant domestic factors. No new BUY positions were initiated; all 16 current paper holdings remain legacy entries from prior weeks, dominated by SIDEWAYS-state MACD hydro trades that lessons 50, 74, and 95 have already flagged. V2 engine momentum signals remain below the 8-observation floor for all patterns, so no intraday lesson is written.",
+  "lessons_to_deactivate": [],
+  "lessons_to_write": [],
+  "gate_proposals": [],
+  "claude_audit": {
+    "buy_count": 16,
+    "buy_win_rate": 0.25,
+    "buy_avg_return": -2.3227,
+    "wait_count": 85,
+    "wait_accuracy": 0.9688,
+    "wait_evaluated_count": 32,
+    "avoid_count": 32,
+    "avoid_evaluated_count": 23,
+    "avoid_accuracy": 1.0,
+    "false_avoid_rate": 0.0,
+    "missed_entry_rate": 0.031,
+    "overall_accuracy": 0.8387,
+    "macro_accuracy": "Domestic macro calls were sound throughout: nepal_score stayed neutral to slightly negative (0 to -2) reflecting NRB liquidity tightening (Rs 1.7 trillion absorbed), political noise from UML internal crisis, and insurance fraud headlines, yet the system correctly flagged the 3-5 day recovery window post-oversold lows (lesson 39) and the 06-29 to 07-02 BEAR-to-CAUTIOUS_BULL transition. Geo scoring tracked remittance flows accurately at neutral (0) for most of the week, with only 07-23 registering +1 briefly on stabilized DXY, which was appropriate. FD rate held steady at 3.99-4.06%, supporting equity allocation throughout. The one macro false positive: SMFBS avoided on nepal_score -4 (lending filter, lesson 100) but resolved +9.31% (MISSED_AVOID, recurring from W28-W29), a single 9-trade contradiction that per rule 3 does not justify adjustment to the lending-sector filter yet.",
+    "audit_summary": "Claude's decision quality improved modestly: resolved WAIT accuracy rebounded to 0.9688 (31/32) from the prior week's 0.8333, and AVOID accuracy held at 1.0 (23/23, up from 0.9545 the week prior). The system correctly avoided new BUY entries during the high-volatility rebound window (06-29 to 07-02) and again during late-week uncertainty (07-22 profit-taking, 07-23 public-debt and insurance-fraud headlines). BUY quality remains the persistent weak leg: 4 wins and 12 losses in the cumulative paper book yield -2.32% average return, with the only closed winner this week (AHL, +4.34%) entered 2026-06-29 in BEAR state with BB_LOWER_TOUCH + OBV rising (the validated edge from lesson 18). The pattern holds: entries in SIDEWAYS state with MACD-primary signals continue to underperform. Lessons 38 (lending-sector macro filter), 50 (high-PE fundamentals), 74 (MACD live track record), 95 (hydro MACD weakness), and 103 (SIDEWAYS state penalty) are all correctly applied in the active WAIT/AVOID roster and do not require modification this week."
+  },
+  "pattern_reviews": [
+    {
+      "event_type": "CIVIL_UNREST",
+      "pattern_status": "ACTIVE",
+      "total_predictions": 1,
+      "resolved_predictions": 0,
+      "weighted_accuracy": 0.0,
+      "recommendation": "INSUFFICIENT_DATA",
+      "reasoning": "Only 1 total prediction with 0 resolved outcomes; insufficient evidence for any recommendation. Monitoring only."
+    },
+    {
+      "event_type": "CORRUPTION_PROBE",
+      "pattern_status": "ACTIVE",
+      "total_predictions": 12,
+      "resolved_predictions": 10,
+      "weighted_accuracy": 0.8,
+      "recommendation": "KEEP",
+      "reasoning": "Weighted accuracy 0.80 (8 correct, 2 wrong direction, 0 wrong timing) with 10 resolved out of 12 total. Meets 0.70+ threshold with 5+ predictions; performance is solid and warrants continuation."
+    },
+    {
+      "event_type": "GOVT_FORMATION",
+      "pattern_status": "ACTIVE",
+      "total_predictions": 2,
+      "resolved_predictions": 2,
+      "weighted_accuracy": 1.0,
+      "recommendation": "INSUFFICIENT_DATA",
+      "reasoning": "Only 2 total predictions with 2 resolved (100% accuracy), but sample size below the 5-prediction threshold for any status change. Continue monitoring as the pattern accumulates evidence."
+    }
+  ]
+}
