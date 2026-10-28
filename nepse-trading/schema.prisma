@@ -34,7 +34,7 @@ model users {
   created_at     Text           // YYYY-MM-DD HH:MM:SS NST
   approved_at    Text
   approved_by    Text           // users.id of the admin who approved (stored as TEXT, no FK constraint)
-  last_active_at Text
+  pin_hash       Text           // SHA-256 of web login PIN, set via Telegram /setpin
 
   @@index([status])
   @@index([role])

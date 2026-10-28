@@ -455,7 +455,6 @@ model nrb_monthly {
 
   // ── Capital Market ────────────────────────────────────────────────────────
   nepse_index_value                   Text   // NEPSE index at report date
-  nepse_index                         Text   // legacy — keep for backward compat
   market_cap_billion_npr              Text
 
   // ── Macro Sentiment ───────────────────────────────────────────────────────
@@ -579,7 +578,6 @@ model learning_hub {
   loss_count          Text
   win_rate            Text
   avg_return_pct      Text
-  avg_pnl_npr         Text
 
   confidence_level    Text   // LOW | MEDIUM | HIGH
 
@@ -599,15 +597,6 @@ model learning_hub {
   validation_count     Text
   trade_journal_ids    Text
   source_weight        Float  @default(1.0)
-  // ── Extended columns present in production ───────────────────────────────
-  lesson               Text   // short human-readable summary of the lesson
-  pattern              Text   // pattern name or identifier
-  outcome              Text   // observed outcome this lesson was derived from
-  confidence           Text   // confidence level (may differ from confidence_level)
-  applied_count        Text   // how many times this lesson has been applied
-  win_when_applied     Text   // win rate when this lesson was the primary driver
-  pnl_npr              Text   // total PnL attributed to this lesson
-  timestamp            Text   // when this row was last written
 
   @@index([symbol])
   @@index([sector])

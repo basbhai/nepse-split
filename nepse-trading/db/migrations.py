@@ -439,6 +439,39 @@ def migration_status() -> dict:
     return report
 
 
+# Columns removed from schema.prisma that still exist in older DBs.
+# python -m db.migrations cleanup   ← drops these, safe (none were ever written).
+_CLEANUP_DROPS: dict[str, list[str]] = {
+    "users": ["last_active_at"],
+}
+
+
+def cleanup_columns() -> dict:
+    """
+    Drop columns removed from schema.prisma.
+    Uses DROP COLUMN IF EXISTS — safe to run multiple times.
+    """
+    dropped, skipped = 0, 0
+    for table, columns in _CLEANUP_DROPS.items():
+        existing = get_existing_columns(table)
+        for col in columns:
+            if col not in existing:
+                log.info("  [SKIP] %s.%s already absent", table, col)
+                skipped += 1
+                continue
+            try:
+                with _db() as cur:
+                    cur.execute(f'ALTER TABLE "{table}" DROP COLUMN IF EXISTS "{col}"')
+                log.info("  [OK] Dropped %s.%s", table, col)
+                _record(f"cleanup_drop_{table}_{col}",
+                        f"cleanup: drop {table}.{col}",
+                        notes="removed from schema.prisma 2026-10-28")
+                dropped += 1
+            except Exception as e:
+                log.error("  [FAIL] Could not drop %s.%s: %s", table, col, e)
+    return {"dropped": dropped, "skipped": skipped}
+
+
 def reset_schema():
     """
     DROP all managed tables and recreate from scratch.
@@ -486,6 +519,12 @@ if __name__ == "__main__":
             miss   = ", ".join(info.get("missing_columns", [])) or "—"
             print(f"  {icon} {table:<23} {status:<8} {str(exp):>8} {str(act):>8}  {miss}")
         print()
+
+    elif cmd == "cleanup":
+        print("\n  Dropping removed columns from DB...\n")
+        _bootstrap()
+        result = cleanup_columns()
+        print(f"  [OK] Cleanup complete: {result['dropped']} dropped, {result['skipped']} already absent\n")
 
     elif cmd == "reset":
         confirm = input("  [WARN]  This will DELETE ALL DATA. Type 'yes' to confirm: ")

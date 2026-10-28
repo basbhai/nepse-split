@@ -29,7 +29,6 @@ TABS: dict[str, str] = {
     "fd_rates": "fd_rates",
     "fd_rate_summary": "fd_rate_summary",
     "share_sectors": "share_sectors",
-    "findings_log": "findings_log",
     "gate_misses": "gate_misses",
     "gate_proposals": "gate_proposals",
     "claude_audit": "claude_audit",
@@ -448,7 +447,6 @@ TABLE_DDL: dict[str, str] = {
         bop_trend TEXT,
         bop_impact_on_nepse TEXT,
         nepse_index_value TEXT,
-        nepse_index TEXT,
         market_cap_billion_npr TEXT,
         overall_sentiment TEXT,
         forward_guidance TEXT,
@@ -562,7 +560,6 @@ TABLE_DDL: dict[str, str] = {
         loss_count TEXT,
         win_rate TEXT,
         avg_return_pct TEXT,
-        avg_pnl_npr TEXT,
         confidence_level TEXT,
         loss_cause_primary TEXT,
         geo_delta_avg TEXT,
@@ -579,14 +576,6 @@ TABLE_DDL: dict[str, str] = {
         validation_count TEXT,
         trade_journal_ids TEXT,
         source_weight FLOAT DEFAULT 1.0,
-        lesson TEXT,
-        pattern TEXT,
-        outcome TEXT,
-        confidence TEXT,
-        applied_count TEXT,
-        win_when_applied TEXT,
-        pnl_npr TEXT,
-        timestamp TEXT,
         inserted_at TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS ix_learning_hub_symbol
@@ -852,26 +841,6 @@ TABLE_DDL: dict[str, str] = {
         inserted_at TIMESTAMPTZ DEFAULT NOW(),
         CONSTRAINT ux_share_sectors_externalid UNIQUE (externalid)
     );
-    """,
-
-    "findings_log": """
-    CREATE TABLE IF NOT EXISTS "findings_log" (
-        id SERIAL PRIMARY KEY,
-        topic_key TEXT NOT NULL,
-        source TEXT,
-        finding TEXT,
-        severity TEXT,
-        status TEXT DEFAULT 'OPEN',
-        status_note TEXT,
-        first_seen TEXT,
-        last_seen TEXT,
-        times_seen TEXT,
-        closed_at TEXT,
-        inserted_at TIMESTAMPTZ DEFAULT NOW(),
-        CONSTRAINT ux_findings_log_topic_key UNIQUE (topic_key)
-    );
-    CREATE INDEX IF NOT EXISTS ix_findings_log_status
-        ON "findings_log" (status);
     """,
 
     "gate_misses": """
@@ -1442,10 +1411,10 @@ TABLE_COLUMNS: dict[str, list[str]] = {
     "candle_signals": ["symbol", "date", "pattern_name", "signal", "tier", "confidence", "volume_confirmed", "candles_used", "description", "timestamp"],
     "geopolitical_data": ["date", "time", "crude_price", "crude_change_pct", "vix", "vix_level", "nifty", "nifty_change_pct", "dxy", "gold_price", "geo_score", "status", "key_event", "timestamp"],
     "nepal_pulse": ["date", "time", "policy_rate", "policy_rate_change", "nrb_event", "sebon_event", "circuit_breaker", "ipo_fpo_active", "ipo_fpo_detail", "govt_stability", "political_event", "budget_season", "budget_event", "remittance_yoy_pct", "inflation_pct", "forex_reserve_months", "bandh_today", "bandh_detail", "load_shedding_hrs", "nepal_score", "nepal_status", "key_event", "source", "timestamp", "headlines_politics", "headlines_economy", "headlines_stock"],
-    "nrb_monthly": ["period", "fiscal_year", "month_number", "is_annual", "policy_rate", "bank_rate", "crr_percentage", "slr_percentage", "lending_rate_pct", "deposit_rate_pct", "interbank_rate_pct", "tbill_91d_rate_pct", "cpi_inflation", "credit_growth_rate", "private_sector_credit_growth_yoy_pct", "m2_growth_yoy_pct", "deposit_growth_yoy_pct", "npl_ratio_pct", "liquidity_injected_billion", "liquidity_status", "remittance_yoy_change_pct", "remittance_total_billion_npr", "fx_reserve_months", "usd_npr_rate", "bop_overall_balance_usd_m", "bop_current_account_usd_m", "bop_capital_account_usd_m", "bop_trade_deficit_usd_m", "bop_status", "bop_trend", "bop_impact_on_nepse", "nepse_index_value", "nepse_index", "market_cap_billion_npr", "overall_sentiment", "forward_guidance", "key_risks"],
+    "nrb_monthly": ["period", "fiscal_year", "month_number", "is_annual", "policy_rate", "bank_rate", "crr_percentage", "slr_percentage", "lending_rate_pct", "deposit_rate_pct", "interbank_rate_pct", "tbill_91d_rate_pct", "cpi_inflation", "credit_growth_rate", "private_sector_credit_growth_yoy_pct", "m2_growth_yoy_pct", "deposit_growth_yoy_pct", "npl_ratio_pct", "liquidity_injected_billion", "liquidity_status", "remittance_yoy_change_pct", "remittance_total_billion_npr", "fx_reserve_months", "usd_npr_rate", "bop_overall_balance_usd_m", "bop_current_account_usd_m", "bop_capital_account_usd_m", "bop_trade_deficit_usd_m", "bop_status", "bop_trend", "bop_impact_on_nepse", "nepse_index_value", "market_cap_billion_npr", "overall_sentiment", "forward_guidance", "key_risks"],
     "fundamentals": ["id", "symbol", "stock_id", "fiscal_year", "quarter", "eps", "net_worth", "roe", "roa", "paidup_capital", "reserve", "total_assets", "total_liabilities", "deposit", "loan", "net_interest_income", "operating_profit", "net_profit", "npl", "capital_fund_to_rwa", "cost_of_fund", "base_rate", "interest_spread", "cd_ratio", "dps", "sector_id", "promoter_shares", "public_shares", "share_registar", "is_delisted", "is_merged", "core_capital", "gram_value", "prev_quarter_profit", "growth_rate", "close", "discount_rate", "pe_ratio", "peg_value", "scraped_at", "company", "sector", "report_date", "data_source", "bvps", "net_profit_npr", "net_profit_growth_pct", "revenue_npr", "revenue_growth_pct", "market_cap_npr", "nim_pct", "npl_pct", "car_pct", "pbv_ratio", "dividend_yield", "debt_to_equity"],
     "fundamental_beta": ["id", "symbol", "beta", "market_corr", "market_corr_p", "n_months", "period_start", "period_end"],
-    "learning_hub": ["created_at", "date", "lesson_type", "source", "symbol", "sector", "applies_to", "consumer", "condition", "finding", "action", "trade_count", "win_count", "loss_count", "win_rate", "avg_return_pct", "avg_pnl_npr", "confidence_level", "loss_cause_primary", "geo_delta_avg", "nepal_delta_avg", "alpha_vs_nepse_avg", "active", "superseded_by", "supersedes_lesson_id", "review_week", "evidence_window_days", "market_log_ids", "gpt_reasoning", "last_validated", "validation_count", "trade_journal_ids", "source_weight", "lesson", "pattern", "outcome", "confidence", "applied_count", "win_when_applied", "pnl_npr", "timestamp"],
+    "learning_hub": ["created_at", "date", "lesson_type", "source", "symbol", "sector", "applies_to", "consumer", "condition", "finding", "action", "trade_count", "win_count", "loss_count", "win_rate", "avg_return_pct", "confidence_level", "loss_cause_primary", "geo_delta_avg", "nepal_delta_avg", "alpha_vs_nepse_avg", "active", "superseded_by", "supersedes_lesson_id", "review_week", "evidence_window_days", "market_log_ids", "gpt_reasoning", "last_validated", "validation_count", "trade_journal_ids", "source_weight"],
     "backtest_results": ["test_name", "sample_size", "confidence", "date_run", "notes", "sim_mode", "period_start", "period_end", "total_trades", "wins", "losses", "win_rate_pct", "profit_factor", "annual_ret_pct", "total_pnl_npr", "alpha_vs_nepse", "signal_breakdown"],
     "capital_allocation": ["date", "market_state", "nepse_vs_200dma", "stocks_pct", "fd_pct", "savings_pct", "od_pct", "fd_rate_used", "expected_return", "reasoning", "review_date", "status"],
     "financial_advisor": ["date", "recommendation_type", "market_phase", "confidence_pct", "capital_in_stocks_pct", "capital_in_fd_pct", "capital_in_savings_pct", "capital_in_od_pct", "three_month_outlook", "expected_return_pct", "fd_rate_used", "trigger_to_change", "review_date", "actual_outcome", "was_forecast_correct"],
@@ -1457,7 +1426,6 @@ TABLE_COLUMNS: dict[str, list[str]] = {
     "fd_rates": ["fetch_date", "institute_code", "institute_name", "product_name", "interest_rate", "interest_pct", "tenure_label", "tenure_months", "tenure_category", "minimum_balance", "institute_type", "source"],
     "fd_rate_summary": ["fetch_date", "avg_rate_pct", "max_rate_pct", "min_rate_pct", "benchmark_rate_pct", "benchmark_products", "best_bank_name", "best_bank_rate", "best_tenure", "rate_vs_prev_pct", "rate_direction", "fd_score_signal", "total_products"],
     "share_sectors": ["externalid", "companyname", "symbol", "securityname", "status", "companyemail", "website", "sectorname", "regulatorybody", "instrumenttype"],
-    "findings_log": ["topic_key", "source", "finding", "severity", "status", "status_note", "first_seen", "last_seen", "times_seen", "closed_at"],
     "gate_misses": ["date", "symbol", "sector", "gate_reason", "gate_category", "price_at_block", "market_state", "tech_score", "conf_score", "volume_os_ratio", "vwap_dev", "bid_ask_ratio", "dpr_proximity", "composite_score_would_be", "tracking_days", "outcome", "outcome_return_pct", "outcome_stamped_at", "decision", "max_high_20d", "max_drawdown_20d", "peak_day", "would_have_caught", "outcome_tier", "engine_source"],
     "gate_proposals": ["review_week", "proposal_number", "parameter_name", "current_value", "proposed_value", "reasoning", "false_block_rate", "sample_size", "status", "decided_at", "applied_at"],
     "claude_audit": ["review_week", "buy_count", "buy_win_rate", "buy_avg_return", "wait_count", "wait_accuracy", "wait_evaluated_count", "avoid_count", "avoid_accuracy", "avoid_evaluated_count", "false_avoid_rate", "missed_entry_rate", "overall_accuracy", "macro_accuracy", "audit_summary"],

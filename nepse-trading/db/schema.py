@@ -34,7 +34,6 @@ TABLE_DDL: dict[str, str] = {
         created_at TEXT,
         approved_at TEXT,
         approved_by TEXT,
-        last_active_at TEXT,
         pin_hash TEXT,
         inserted_at TIMESTAMPTZ DEFAULT NOW()
     );
@@ -379,7 +378,7 @@ TABLE_DDL: dict[str, str] = {
 }
 
 TABLE_COLUMNS: dict[str, list[str]] = {
-    "users": ["full_name", "email", "phone", "kyc_name", "status", "role", "notes", "created_at", "approved_at", "approved_by", "last_active_at", "pin_hash"],
+    "users": ["full_name", "email", "phone", "kyc_name", "status", "role", "notes", "created_at", "approved_at", "approved_by", "pin_hash"],
     "user_channels": ["user_id", "platform", "platform_user_id", "username", "is_primary", "linked_at"],
     "user_meroshare": ["user_id", "label", "dp_id", "demat_number", "client_code", "username", "password_enc", "is_active", "is_primary", "last_verified_at", "last_synced_at", "notes", "created_at"],
     "user_broker": ["user_id", "label", "broker_name", "broker_code", "tms_base_url", "username", "password_enc", "acnt_id", "watch_id", "client_code", "account_type", "is_active", "is_primary", "auto_execute_enabled", "max_auto_buy_npr", "last_verified_at", "notes", "created_at"],
